@@ -1,0 +1,104 @@
+name: SLM CDN Upload
+inputs:
+  - { name: tokenizer_json, type: Model, description: "Tokenizer / vocabulary JSON file" }
+  - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
+  - { name: model_config, type: Data, description: "Model config file (json/yaml)" }
+
+  - { name: bearer_token, type: string, description: "Path to bearer token file" }
+  - { name: domain, type: String, description: "Upload API domain" }
+  - { name: get_cdn, type: String, description: "CDN base URL" }
+
+outputs:
+  - { name: schema_json, type: String, description: "Final schema JSON with CDN URLs and timestamp" }
+
+implementation:
+  container:
+    image: python:3.8
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, subprocess, json, os, time, sys, traceback
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--tokenizer_json", required=True)
+        parser.add_argument("--model_pt", required=True)
+        parser.add_argument("--model_config", required=True)
+
+        parser.add_argument("--bearer_token", required=True)
+        parser.add_argument("--domain", required=True)
+        parser.add_argument("--get_cdn", required=True)
+
+        parser.add_argument("--schema_json", required=True)
+        args = parser.parse_args()
+
+        def upload(file_path, token):
+            url = (
+                f"{args.domain.rstrip('/')}"
+                "/mobius-content-service/v1.0/content/upload"
+                "?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
+            )
+
+            cmd = [
+                "curl",
+                "--location", url,
+                "--header", f"Authorization: Bearer {token}",
+                "--form", f"file=@{file_path}",
+                "--fail",
+                "--show-error"
+            ]
+
+            p = subprocess.run(cmd, capture_output=True)
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.decode())
+
+            resp = json.loads(p.stdout.decode())
+            cdn_rel = resp.get("cdnUrl")
+            if not cdn_rel:
+                raise ValueError("cdnUrl missing in response")
+
+            return f"{args.get_cdn.rstrip('/')}{cdn_rel}"
+
+        try:
+            with open(args.bearer_token, "r") as f:
+                token = f.read().strip()
+
+            vocab_cdn = upload(args.tokenizer_json, token)
+            pt_cdn = upload(args.model_pt, token)
+            config_cdn = upload(args.model_config, token)
+
+            schema = {
+                "timestamp": int(time.time()),
+                "config_cdn": config_cdn,
+                "pt_cdn": pt_cdn,
+                "vocabulary_cdn": vocab_cdn
+            }
+
+            with open(args.schema_json, "w") as f:
+                json.dump(schema, f)
+
+            print("[INFO] Upload successful")
+            print(json.dumps(schema, indent=2))
+
+        except Exception as e:
+            print("ERROR:", str(e), file=sys.stderr)
+            traceback.print_exc()
+            raise
+    args:
+      - --tokenizer_json
+      - { inputPath: tokenizer_json }
+      - --model_pt
+      - { inputPath: model_pt }
+      - --model_config
+      - { inputPath: model_config }
+
+      - --bearer_token
+      - { inputPath: bearer_token }
+      - --domain
+      - { inputValue: domain }
+      - --get_cdn
+      - { inputValue: get_cdn }
+
+      - --schema_json
+      - { outputPath: schema_json }
