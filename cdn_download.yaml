@@ -1,0 +1,163 @@
+name: CDN Download
+description: Downloads trained_model.pt, config.json, and tokenizer.json files from CDN URLs with bearer token auth and URL fallback support.
+inputs:
+  - {name: pt_url, type: String, description: "URL to fetch the trained_model.pt model file from"}
+  - {name: config_url, type: String, description: "URL to fetch the config.json file from"}
+  - {name: tokenizer_url, type: String, description: "URL to fetch the tokenizer.json file from"}
+  - {name: bearer_token, type: string, optional: true, default: "", description: "Bearer token for authentication"}
+outputs:
+  - {name: pt_file, type: Model, description: "Downloaded trained_model.pt model file"}
+  - {name: config_file, type: Data, description: "Downloaded config.json file"}
+  - {name: tokenizer_file, type: Model, description: "Downloaded tokenizer.json file"}
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - sh
+      - -c
+      - |
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet requests || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet requests --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import requests
+        import sys
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util import Retry
+        except Exception:
+            from urllib3 import Retry
+
+        CHUNK_SIZE = 16 * 1024
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--pt_url', type=str, required=True)
+        parser.add_argument('--pt_file', type=str, required=True)
+        parser.add_argument('--config_url', type=str, required=True)
+        parser.add_argument('--config_file', type=str, required=True)
+        parser.add_argument('--tokenizer_url', type=str, required=True)
+        parser.add_argument('--tokenizer_file', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, default="")
+
+        args = parser.parse_args()
+
+        # Setup session with retry logic
+        session = requests.Session()
+        retry = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        session.mount("http://", HTTPAdapter(max_retries=retry))
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        # Setup bearer token authentication
+        headers = {}
+        if args.bearer_token and os.path.exists(args.bearer_token):
+            with open(args.bearer_token, "r") as f:
+                token = f.read().strip()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                    print("Bearer token loaded for authentication")
+
+        def makedirs(p):
+            if p and not os.path.exists(p):
+                os.makedirs(p, exist_ok=True)
+
+        def resolve_output_path(output_arg, default_filename):
+            # If the runtime passed a path whose basename is 'data' (common in KFP/Argo),
+            # treat that as the final file path and return it.
+            # Otherwise treat output_arg as a directory and return dir/default_filename.
+            base = os.path.basename(output_arg)
+            if base == "data":
+                makedirs(os.path.dirname(output_arg) or ".")
+                return output_arg
+            else:
+                makedirs(output_arg)
+                return os.path.join(output_arg, default_filename)
+
+        def candidate_urls(url):
+            if "$$$_" in url:
+                return [url, url.replace("$$$_", "$$_")]
+            return [url]
+
+        def download_stream_to_file(url, out_file, timeout=300):
+            print(f"Downloading {url} -> {out_file}")
+            makedirs(os.path.dirname(out_file) or ".")
+            
+            last_error = None
+            for candidate_url in candidate_urls(url):
+                try:
+                    print(f"Trying URL: {candidate_url}")
+                    with session.get(candidate_url, stream=True, headers=headers, timeout=timeout) as r:
+                        r.raise_for_status()
+                        total = 0
+                        with open(out_file, "wb") as fh:
+                            for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                                if chunk:
+                                    fh.write(chunk)
+                                    total += len(chunk)
+                    print(f"Saved {out_file} ({total} bytes)")
+                    return total
+                except requests.exceptions.RequestException as e:
+                    print(f"Download failed for {candidate_url}: {e}")
+                    last_error = e
+            
+            # If all URLs failed, raise the last error
+            print(f"All download attempts failed for {url}")
+            raise last_error
+
+        try:
+            print("pt_url:", args.pt_url)
+            print("config_url:", args.config_url)
+            print("tokenizer_url:", args.tokenizer_url)
+
+            # Resolve final output paths (support both directory-style and runtime 'data' file)
+            pt_out = resolve_output_path(args.pt_file, "trained_model.pt")
+            cfg_out = resolve_output_path(args.config_file, "config.json")
+            tok_out = resolve_output_path(args.tokenizer_file, "tokenizer.json")
+
+            # Download files into those paths with fallback support
+            download_stream_to_file(args.pt_url, pt_out, timeout=600)
+            download_stream_to_file(args.config_url, cfg_out, timeout=120)
+            download_stream_to_file(args.tokenizer_url, tok_out, timeout=120)
+
+            # Basic verification
+            for fpath, label in [
+                (pt_out, "PT model"),
+                (cfg_out, "Config file"),
+                (tok_out, "Tokenizer file"),
+            ]:
+                if not (os.path.exists(fpath) and os.path.getsize(fpath) > 0):
+                    print(f"Error: {label} missing or empty: {fpath}")
+                    sys.exit(1)
+                else:
+                    print(f"Verified {label}: {fpath} ({os.path.getsize(fpath)} bytes)")
+
+            print("All files downloaded and verified successfully.")
+            print("Artifacts produced:")
+            print(" - PT path:", pt_out)
+            print(" - Config path:", cfg_out)
+            print(" - Tokenizer path:", tok_out)
+
+        except Exception as e:
+            print("Error during download:", str(e))
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    args:
+      - --pt_url
+      - {inputValue: pt_url}
+      - --pt_file
+      - {outputPath: pt_file}
+      - --config_url
+      - {inputValue: config_url}
+      - --config_file
+      - {outputPath: config_file}
+      - --tokenizer_url
+      - {inputValue: tokenizer_url}
+      - --tokenizer_file
+      - {outputPath: tokenizer_file}
+      - --bearer_token
+      - {inputPath: bearer_token}
