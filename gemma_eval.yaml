@@ -1,4 +1,4 @@
-name: GemmaLMEval V1
+name: GemmaLMEval V2
 description: Evaluate a cloud-pickled Gemma3LM using lm_eval (torchao-safe)
 inputs:
   - name: gemma_model
@@ -22,7 +22,7 @@ outputs:
     description: Evaluation results JSON
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: gurpreetgandhi/nesy-factory:vtest4
     command:
       - python3
       - -u
