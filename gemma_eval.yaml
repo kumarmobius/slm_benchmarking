@@ -1,4 +1,4 @@
-name: GemmaLMEval V3.1
+name: GemmaLMEval V3.2
 description: Evaluate a cloud-pickled Gemma3LM using lm_eval (in-container import patches)
 inputs:
   - name: gemma_model
@@ -22,7 +22,7 @@ outputs:
     description: Evaluation results JSON
 implementation:
   container:
-    image: kumar2004/latest:v4
+    image: kumar2004/gemma-lm-eval:v1
     command:
       - python3
       - -u
