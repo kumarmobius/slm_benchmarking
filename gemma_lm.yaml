@@ -1,4 +1,4 @@
-name: Build Gemma3LM v2.1
+name: Build Gemma3LM v2.2
 inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
@@ -222,6 +222,26 @@ implementation:
         
         with open(args.model_config, "r") as f:
             cfg = json.load(f)
+        
+        # Convert dtype string to torch dtype
+        dtype_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float64": torch.float64,
+            "torch.float32": torch.float32,
+            "torch.float16": torch.float16,
+            "torch.bfloat16": torch.bfloat16,
+            "torch.float64": torch.float64
+        }
+        
+        if "dtype" in cfg:
+            dtype_str = cfg["dtype"]
+            if isinstance(dtype_str, str):
+                cfg["dtype"] = dtype_map.get(dtype_str, torch.float32)
+                print(f"[INFO] Converted dtype '{dtype_str}' to {cfg['dtype']}")
+            else:
+                print(f"[INFO] dtype already in correct format: {cfg['dtype']}")
         
         if "qk_norm" in cfg:
             cfg["qk_norm"] = bool(cfg["qk_norm"])
