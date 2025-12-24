@@ -1,5 +1,5 @@
-name: GemmaLMEval V2
-description: Evaluate a cloud-pickled Gemma3LM using lm_eval (torchao-safe)
+name: GemmaLMEval V3
+description: Evaluate a cloud-pickled Gemma3LM using lm_eval (in-container import patches)
 inputs:
   - name: gemma_model
     type: Model
@@ -33,27 +33,61 @@ implementation:
         import sys
         import json
         import cloudpickle
+        import types
 
-        # ------------------------------------------------------------------
-        # FIX: torchao expects torch._dynamo.utils.warn_once (missing in torch 2.2)
-        # Patch it BEFORE lm_eval / transformers import anything
-        # ------------------------------------------------------------------
         try:
-            import torch._dynamo.utils as _du
-            if not hasattr(_du, "warn_once"):
-                def warn_once(*args, **kwargs):
-                    return None
-                _du.warn_once = warn_once
-                print("[PATCH] Injected torch._dynamo.utils.warn_once")
-        except Exception as e:
-            print("[PATCH] torch._dynamo patch skipped:", e)
+            import torch
+            try:
+                du = getattr(torch, "_dynamo").utils if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "utils") else None
+            except Exception:
+                du = None
 
-        # Safe to import lm_eval now
-        from lm_eval import evaluator
+            if du is None:
+                # create a minimal structure
+                if not hasattr(torch, "_dynamo"):
+                    torch._dynamo = types.SimpleNamespace()
+                torch._dynamo.utils = types.SimpleNamespace()
+                torch._dynamo.utils.warn_once = lambda *a, **k: None
+                print("[PATCH] Created torch._dynamo.utils.warn_once (fresh)")
+            else:
+                if not hasattr(du, "warn_once"):
+                    du.warn_once = lambda *a, **k: None
+                    print("[PATCH] Injected torch._dynamo.utils.warn_once")
+
+            # patch torch._inductor.config.max_autotune_gemm_search_space if missing
+            try:
+                ind = getattr(torch, "_inductor", None)
+            except Exception:
+                ind = None
+
+            if ind is None:
+                # create minimal inductor module + config
+                torch._inductor = types.SimpleNamespace()
+                torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
+                print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
+            else:
+                cfg = getattr(torch._inductor, "config", None)
+                if cfg is None:
+                    torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
+                    print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
+                else:
+                    if not hasattr(cfg, "max_autotune_gemm_search_space"):
+                        setattr(torch._inductor.config, "max_autotune_gemm_search_space", "NONE")
+                        print("[PATCH] Set torch._inductor.config.max_autotune_gemm_search_space='NONE'")
+
+        except Exception as e:
+            print("[PATCH] torch patch skipped (could not import torch or set attributes):", repr(e))
+
+        # Now safe-ish to import lm_eval / transformers related modules
+        try:
+            from lm_eval import evaluator
+        except Exception as e:
+            print("[FATAL] Failed to import lm_eval after patches:", repr(e), file=sys.stderr)
+            raise
 
         def main():
             parser = argparse.ArgumentParser(
-                description="Run lm_eval on a cloud-pickled Gemma3LM"
+                description="Run lm_eval on a cloud-pickled Gemma3LM (with runtime torch patches)"
             )
 
             # Inputs
@@ -116,7 +150,7 @@ implementation:
                 limit=args.limit
             )
 
-            print("=" * 50)
+            print(+"=" * 50)
             print("RESULTS:")
             print("=" * 50)
             for key, value in results.get("results", {}).items():
