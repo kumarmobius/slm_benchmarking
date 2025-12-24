@@ -67,25 +67,13 @@ implementation:
                 makedirs(output_arg)
                 return os.path.join(output_arg, default_filename)
 
-        def encode_special_chars(url):
-            url = url.replace("$", "%24")
-            url = url.replace("(", "%28")
-            url = url.replace(")", "%29")
-            url = url.replace("[", "%5B")
-            url = url.replace("]", "%5D")
-            url = url.replace("{", "%7B")
-            url = url.replace("}", "%7D")
-            return url
-
         def download_stream_to_file(url, out_file, timeout=300):
-            encoded_url = encode_special_chars(url)
-            print(f"Original URL: {url}")
-            print(f"Encoded URL: {encoded_url}")
+            print(f"URL: {url}")
             print(f"Downloading to: {out_file}")
             makedirs(os.path.dirname(out_file) or ".")
             
             try:
-                with session.get(encoded_url, stream=True, headers=headers, timeout=timeout) as r:
+                with session.get(url, stream=True, headers=headers, timeout=timeout) as r:
                     r.raise_for_status()
                     total = 0
                     with open(out_file, "wb") as fh:
@@ -96,7 +84,7 @@ implementation:
                 print(f"Saved {out_file} ({total} bytes)")
                 return total
             except requests.exceptions.RequestException as e:
-                print(f"Download failed for {encoded_url}: {e}")
+                print(f"Download failed for {url}: {e}")
                 raise
 
         try:
@@ -109,7 +97,7 @@ implementation:
             cfg_out = resolve_output_path(args.config_file, "config.json")
             tok_out = resolve_output_path(args.tokenizer_file, "tokenizer.json")
 
-            # Download files with URL encoding
+            # Download files
             download_stream_to_file(args.pt_url, pt_out, timeout=600)
             download_stream_to_file(args.config_url, cfg_out, timeout=120)
             download_stream_to_file(args.tokenizer_url, tok_out, timeout=120)
