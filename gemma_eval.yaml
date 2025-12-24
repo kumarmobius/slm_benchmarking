@@ -1,5 +1,5 @@
-name: GemmaLMEval
-description: Evaluate a cloud-pickled Gemma3LM using lm_eval
+name: GemmaLMEval V1
+description: Evaluate a cloud-pickled Gemma3LM using lm_eval (torchao-safe)
 inputs:
   - name: gemma_model
     type: Model
@@ -22,7 +22,7 @@ outputs:
     description: Evaluation results JSON
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtest4
+    image: nikhilv215/nesy-factory:v22
     command:
       - python3
       - -u
@@ -33,6 +33,22 @@ implementation:
         import sys
         import json
         import cloudpickle
+
+        # ------------------------------------------------------------------
+        # FIX: torchao expects torch._dynamo.utils.warn_once (missing in torch 2.2)
+        # Patch it BEFORE lm_eval / transformers import anything
+        # ------------------------------------------------------------------
+        try:
+            import torch._dynamo.utils as _du
+            if not hasattr(_du, "warn_once"):
+                def warn_once(*args, **kwargs):
+                    return None
+                _du.warn_once = warn_once
+                print("[PATCH] Injected torch._dynamo.utils.warn_once")
+        except Exception as e:
+            print("[PATCH] torch._dynamo patch skipped:", e)
+
+        # Safe to import lm_eval now
         from lm_eval import evaluator
 
         def main():
