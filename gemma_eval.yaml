@@ -1,0 +1,127 @@
+name: GemmaLMEval
+description: Evaluate a cloud-pickled Gemma3LM using lm_eval
+inputs:
+  - name: gemma_model
+    type: Model
+    description: Cloud-pickled Gemma3LM object
+  - name: tasks
+    type: String
+    default: "wikitext"
+    description: Comma-separated lm_eval task names
+  - name: num_fewshot
+    type: Integer
+    default: "0"
+    description: Number of few-shot examples
+  - name: limit
+    type: Integer
+    default: "1"
+    description: Evaluation limit
+outputs:
+  - name: eval_results
+    type: Data
+    description: Evaluation results JSON
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:vtest4
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import cloudpickle
+        from lm_eval import evaluator
+
+        def main():
+            parser = argparse.ArgumentParser(
+                description="Run lm_eval on a cloud-pickled Gemma3LM"
+            )
+
+            # Inputs
+            parser.add_argument(
+                "--gemma_model",
+                required=True,
+                help="Path to cloud-pickled Gemma3LM"
+            )
+            parser.add_argument(
+                "--tasks",
+                required=True,
+                help="Comma-separated lm_eval tasks"
+            )
+            parser.add_argument(
+                "--num_fewshot",
+                type=int,
+                required=True,
+                help="Number of few-shot examples"
+            )
+            parser.add_argument(
+                "--limit",
+                type=int,
+                required=True,
+                help="Evaluation limit"
+            )
+
+            # Outputs
+            parser.add_argument(
+                "--out_results",
+                required=True,
+                help="Path to write evaluation results JSON"
+            )
+
+            args = parser.parse_args()
+
+            print("[EVAL] Parsed arguments:")
+            for k, v in vars(args).items():
+                print(f"  {k}: {v}")
+
+            if not os.path.exists(args.gemma_model):
+                print(f"[FATAL] gemma_model not found: {args.gemma_model}", file=sys.stderr)
+                sys.exit(2)
+
+            print("[EVAL] Loading Gemma3LM from cloud pickle")
+            with open(args.gemma_model, "rb") as f:
+                gemma_lm = cloudpickle.load(f)
+
+            print("[EVAL] Loaded object type:", type(gemma_lm))
+
+            task_list = [t.strip() for t in args.tasks.split(",") if t.strip()]
+            if not task_list:
+                print("[FATAL] No valid tasks provided", file=sys.stderr)
+                sys.exit(3)
+
+            print("[EVAL] Running lm_eval.simple_evaluate")
+            results = evaluator.simple_evaluate(
+                model=gemma_lm,
+                tasks=task_list,
+                num_fewshot=args.num_fewshot,
+                limit=args.limit
+            )
+
+            print("=" * 50)
+            print("RESULTS:")
+            print("=" * 50)
+            for key, value in results.get("results", {}).items():
+                print(f"{key}: {value}")
+
+            os.makedirs(os.path.dirname(args.out_results), exist_ok=True)
+            with open(args.out_results, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2)
+
+            print("[EVAL] Results written to:", args.out_results)
+
+        if __name__ == "__main__":
+            main()
+    args:
+      - --gemma_model
+      - {inputPath: gemma_model}
+      - --tasks
+      - {inputValue: tasks}
+      - --num_fewshot
+      - {inputValue: num_fewshot}
+      - --limit
+      - {inputValue: limit}
+      - --out_results
+      - {outputPath: eval_results}
