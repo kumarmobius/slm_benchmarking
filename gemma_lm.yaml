@@ -16,6 +16,7 @@ implementation:
       - -c
       - |
         import argparse
+        import os
         import json
         import torch
         import cloudpickle
