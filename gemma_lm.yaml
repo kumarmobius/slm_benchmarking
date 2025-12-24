@@ -10,7 +10,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtests3
+    image: gurpreetgandhi/nesy-factory:vtest4
     command:
       - python3
       - -u
@@ -21,8 +21,8 @@ implementation:
         import torch
         import cloudpickle
         from tokenizers import Tokenizer
-        from model import Gemma3Model
-        from lm import Gemma3LM
+        from nesy_factory.language_model.gemma import Gemma3Builder
+        from nesy_factory.language_model.gemma_wrapper import Gemma3LM
 
         parser = argparse.ArgumentParser()
         parser.add_argument("--tokenizer_json", required=True)
