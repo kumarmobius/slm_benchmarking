@@ -9,9 +9,6 @@ inputs:
   - name: model_config_json
     type: Data
     description: Path to model config JSON file (optional)
-  - name: model_name
-    type: String
-    description: "Which model format to convert: 'gptneox' or 'gemma3' (required)"
   - name: max_new_tokens
     type: Integer
     default: "80"
@@ -34,7 +31,6 @@ implementation:
         import json
         import shutil
         import re
-        import time
         from collections import OrderedDict
         import torch
 
@@ -42,11 +38,10 @@ implementation:
             if path and not os.path.exists(path):
                 os.makedirs(path, exist_ok=True)
 
-        parser = argparse.ArgumentParser(description="HF converter (gptneox | gemma3)")
+        parser = argparse.ArgumentParser(description="HF converter (gptneox only)")
         parser.add_argument("--tokenizer_json", default="", help="tokenizer.json (optional)")
         parser.add_argument("--model_pt", required=True, help="Source checkpoint .pt/.bin")
         parser.add_argument("--model_config_json", default="", help="base config JSON (optional)")
-        parser.add_argument("--model_name", required=True, choices=["gptneox","gemma3"], help="model type to convert")
         parser.add_argument("--max_new_tokens", type=int, default=80, help="max new tokens")
         parser.add_argument("--out_converted", default="/tmp/outputs/converted_model/data", help="Artifact output dir")
         args = parser.parse_args()
@@ -54,7 +49,6 @@ implementation:
         TOKENIZER_JSON = args.tokenizer_json
         SRC_PT = args.model_pt
         BASE_CFG_JSON = args.model_config_json
-        MODEL_NAME = args.model_name.lower()
         MAX_NEW_TOKENS = args.max_new_tokens
         OUT_CONVERTED = args.out_converted
 
@@ -65,7 +59,6 @@ implementation:
         print("  tokenizer_json:", TOKENIZER_JSON)
         print("  model_pt      :", SRC_PT)
         print("  config_json   :", BASE_CFG_JSON)
-        print("  model_name    :", MODEL_NAME)
         print("  max_new_tokens:", MAX_NEW_TOKENS)
         print("  out_converted :", OUT_CONVERTED)
         print("  intermediate_model_dir:", MODEL_DIR)
@@ -126,238 +119,113 @@ implementation:
             except Exception:
                 base_cfg = {}
 
-        # Branch by model type
-        if MODEL_NAME == "gptneox":
-            print("[CONVERT] Running GPT-NeoX conversion branch")
+        # GPT-NeoX conversion branch (only)
+        print("[CONVERT] Running GPT-NeoX conversion (single-mode)")
 
-            # Original NeoX normalization logic (kept from supplied script)
-            def normalize_keys_neox(orig_sd):
-                od = OrderedDict(orig_sd)
-                has_prefix = any(k.startswith("gpt_neox.") for k in od.keys())
-                new_od = OrderedDict()
-                if not has_prefix:
-                    for k, v in od.items():
-                        new_od["gpt_neox." + k] = v
-                else:
-                    new_od = OrderedDict(od)
-                replacements = {
-                    ".attention.qkv_proj.": ".attention.query_key_value.",
-                    ".attention.out_proj.": ".attention.dense.",
-                    ".final_layernorm.": ".final_layer_norm.",
-                }
-                remapped = OrderedDict()
-                for k, v in new_od.items():
-                    newk = k
-                    for old, new in replacements.items():
-                        if old in newk:
-                            newk = newk.replace(old, new)
-                    remapped[newk] = v
-                return remapped
-
-            out = normalize_keys_neox(sd)
-
-            # embed_out tie fallback
-            if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
-                out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
-
-            # synthesize attention biases if absent (as in original)
-            layer_ids = sorted({int(m.group(1)) for k in out.keys()
-                                for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
-            for i in layer_ids:
-                wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
-                wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
-                if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
-                    out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = torch.zeros(wq.size(0), dtype=wq.dtype)
-                if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
-                    out[f"gpt_neox.layers.{i}.attention.dense.bias"] = torch.zeros(wo.size(0), dtype=wo.dtype)
-
-            torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
-            print("[CONVERT] Wrote pytorch_model.bin (gptneox)")
-
-            if "gpt_neox.embed_in.weight" not in out and "gpt_neox.embed_in.weight" not in out and "gpt_neox.embed_in.weight" not in sd:
-                # attempt some legacy checks
-                if "gpt_neox.embed_in.weight" not in out:
-                    print("[FATAL] checkpoint missing gpt_neox.embed_in.weight", file=sys.stderr)
-                    sys.exit(3)
-
-            # infer dims
-            vocab_size, hidden_size = out["gpt_neox.embed_in.weight"].shape
-            layer_nums = [int(re.search(r"gpt_neox\.layers\.(\d+)\.", k).group(1))
-                          for k in out if k.startswith("gpt_neox.layers.")]
-            num_layers = 1 + max(layer_nums) if layer_nums else 1
-
-            if "gpt_neox.layers.0.mlp.dense_h_to_4h.weight" in out:
-                intermediate_size = out["gpt_neox.layers.0.mlp.dense_h_to_4h.weight"].shape[0]
+        def normalize_keys_neox(orig_sd):
+            od = OrderedDict(orig_sd)
+            has_prefix = any(k.startswith("gpt_neox.") for k in od.keys())
+            new_od = OrderedDict()
+            if not has_prefix:
+                for k, v in od.items():
+                    new_od["gpt_neox." + k] = v
             else:
-                intermediate_size = hidden_size * 4
-
-            def infer_heads(hid):
-                for h in [32, 16, 8, 24, 12, 4, 2]:
-                    if hid % h == 0:
-                        return h
-                return max(1, hid // 64) or 8
-
-            def detect_tie(sd_map):
-                try:
-                    return sd_map["gpt_neox.embed_out.weight"].data_ptr() == sd_map["gpt_neox.embed_in.weight"].data_ptr()
-                except Exception:
-                    return False
-
-            num_heads = int(base_cfg.get("num_attention_heads") or base_cfg.get("num_heads") or infer_heads(hidden_size))
-            max_pos = int(base_cfg.get("max_position_embeddings") or base_cfg.get("max_seq_len") or 512)
-            rotary_pct = float(base_cfg.get("rotary_pct", 0.25))
-            tie_word_embeddings = bool(base_cfg.get("tie_word_embeddings", detect_tie(out)))
-
-            hf_cfg = {
-                "architectures": ["GPTNeoXForCausalLM"],
-                "model_type": "gpt_neox",
-                "vocab_size": int(vocab_size),
-                "hidden_size": int(hidden_size),
-                "intermediate_size": int(intermediate_size),
-                "num_attention_heads": int(num_heads),
-                "num_hidden_layers": int(num_layers),
-                "max_position_embeddings": int(max_pos),
-                "rotary_pct": rotary_pct,
-                "tie_word_embeddings": tie_word_embeddings,
+                new_od = OrderedDict(od)
+            replacements = {
+                ".attention.qkv_proj.": ".attention.query_key_value.",
+                ".attention.out_proj.": ".attention.dense.",
+                ".final_layernorm.": ".final_layer_norm.",
             }
+            remapped = OrderedDict()
+            for k, v in new_od.items():
+                newk = k
+                for old, new in replacements.items():
+                    if old in newk:
+                        newk = newk.replace(old, new)
+                remapped[newk] = v
+            return remapped
 
-            with open(os.path.join(MODEL_DIR, "config.json"), "w", encoding="utf-8") as f:
-                json.dump(hf_cfg, f, indent=2)
-            print("[CONVERT] Wrote config.json (gptneox)")
+        out = normalize_keys_neox(sd)
 
-            # if tied, drop embed_out
-            if tie_word_embeddings and "gpt_neox.embed_out.weight" in out:
-                out.pop("gpt_neox.embed_out.weight", None)
-                torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
-                print("[CONVERT] Re-saved pytorch_model.bin without embed_out (tied)")
+        # embed_out tie fallback
+        if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
+            out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
-            # tokenizer files + configs
-            tok_cfg = write_tokenizer_files(MODEL_DIR, TOKENIZER_JSON, base_cfg)
+        # synthesize attention biases if absent
+        layer_ids = sorted({int(m.group(1)) for k in out.keys()
+                            for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
+        for i in layer_ids:
+            wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
+            wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
+            if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
+                out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = torch.zeros(wq.size(0), dtype=wq.dtype)
+            if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
+                out[f"gpt_neox.layers.{i}.attention.dense.bias"] = torch.zeros(wo.size(0), dtype=wo.dtype)
 
-            gen_cfg = {"max_length": tok_cfg.get("model_max_length", 512), "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
-            with open(os.path.join(MODEL_DIR, "generation_config.json"), "w", encoding="utf-8") as f:
-                json.dump(gen_cfg, f, indent=2)
+        torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+        print("[CONVERT] Wrote pytorch_model.bin (gptneox)")
 
-        elif MODEL_NAME == "gemma3":
-            print("[CONVERT] Running Gemma-3 conversion branch")
+        if "gpt_neox.embed_in.weight" not in out:
+            print("[FATAL] checkpoint missing gpt_neox.embed_in.weight", file=sys.stderr)
+            sys.exit(3)
 
-            # Gemma-3 expected keys look like:
-            # model.embed_tokens.weight
-            # model.layers.{i}.self_attn.q_proj.weight, k_proj, v_proj, o_proj, q_norm, k_norm
-            # model.layers.{i}.mlp.gate_proj/up_proj/down_proj
-            # model.norm.weight
-            # lm_head.weight
+        # infer dims
+        vocab_size, hidden_size = out["gpt_neox.embed_in.weight"].shape
+        layer_nums = [int(re.search(r"gpt_neox\.layers\.(\d+)\.", k).group(1))
+                      for k in out if k.startswith("gpt_neox.layers.")]
+        num_layers = 1 + max(layer_nums) if layer_nums else 1
 
-            # verify minimal expected keys
-            if not any(k.startswith("model.embed_tokens") for k in sd.keys()):
-                print("[WARN] model.embed_tokens.weight not found at top-level. Attempting fallback checks...", file=sys.stderr)
-
-            # Save weights AS-IS (HF gemma3 expects keys already like model.*)
-            torch.save(sd, os.path.join(MODEL_DIR, "pytorch_model.bin"))
-            print("[CONVERT] Wrote pytorch_model.bin (gemma3)")
-
-            # infer dims robustly
-            if "model.embed_tokens.weight" not in sd:
-                print("[FATAL] gemma3 checkpoint missing model.embed_tokens.weight", file=sys.stderr)
-                sys.exit(4)
-
-            embed_w = sd["model.embed_tokens.weight"]
-            vocab_size, hidden_size = embed_w.shape
-
-            # count layers with q_proj present
-            layer_idxs = sorted({int(re.match(r"model\.layers\.(\d+)\.", k).group(1))
-                                  for k in sd.keys() if re.match(r"model\.layers\.(\d+)\.", k)})
-            num_hidden_layers = len(layer_idxs)
-            if num_hidden_layers == 0:
-                # fallback: try to find "layers.0" style anywhere
-                layer_idxs = sorted({int(m.group(1)) for k in sd.keys()
-                                     for m in [re.search(r"layers\.(\d+)\.", k)] if m})
-                num_hidden_layers = len(layer_idxs)
-
-            # infer intermediate size from first layer mlp up_proj if present
-            if "model.layers.0.mlp.up_proj.weight" in sd:
-                intermediate_size = sd["model.layers.0.mlp.up_proj.weight"].shape[0]
-            elif any("mlp.up_proj.weight" in k for k in sd.keys()):
-                # pick a representative up_proj
-                up_key = next(k for k in sd.keys() if "mlp.up_proj.weight" in k)
-                intermediate_size = sd[up_key].shape[0]
-            else:
-                intermediate_size = hidden_size * 4
-
-            # infer q/k dims to compute heads
-            # prefer layer 0 if present
-            q_shape = sd.get("model.layers.0.self_attn.q_proj.weight")
-            k_shape = sd.get("model.layers.0.self_attn.k_proj.weight")
-            v_shape = sd.get("model.layers.0.self_attn.v_proj.weight")
-
-            if q_shape is None or k_shape is None:
-                # attempt to find any q_proj/k_proj key
-                q_key = next((k for k in sd.keys() if k.endswith(".self_attn.q_proj.weight")), None)
-                k_key = next((k for k in sd.keys() if k.endswith(".self_attn.k_proj.weight")), None)
-                v_key = next((k for k in sd.keys() if k.endswith(".self_attn.v_proj.weight")), None)
-                q_shape = sd.get(q_key) if q_key else None
-                k_shape = sd.get(k_key) if k_key else None
-                v_shape = sd.get(v_key) if v_key else None
-
-            if q_shape is None or k_shape is None:
-                print("[FATAL] Could not find q_proj/k_proj weights to infer attention heads.", file=sys.stderr)
-                # still write minimal config but exit non-zero
-                # (we choose to exit to avoid producing incorrect config)
-                sys.exit(5)
-
-            q_out = q_shape.shape[0]
-            k_out = k_shape.shape[0]
-            # head_dim is typically given in config; try to get it, fallback to hidden_size // num_attention_heads later
-            head_dim = int(base_cfg.get("head_dim") or base_cfg.get("head_size") or None) if base_cfg else None
-
-            if head_dim is None:
-                candidates = [128, 64, 32, 16, 8]
-                inferred_head_dim = None
-                for c in candidates:
-                    if hidden_size % c == 0 and q_out % c == 0:
-                        inferred_head_dim = c
-                        break
-                if inferred_head_dim is None:
-                    # last resort
-                    inferred_head_dim = max(1, hidden_size // 8)
-                head_dim = inferred_head_dim
-
-            num_attention_heads = q_out // head_dim if head_dim and head_dim>0 else max(1, q_out // (hidden_size // 8))
-            num_key_value_heads = k_out // head_dim if head_dim and head_dim>0 else 1
-
-            max_pos = int(base_cfg.get("context_length") or base_cfg.get("max_position_embeddings") or base_cfg.get("max_seq_len") or 2048)
-
-            hf_cfg = {
-                "architectures": ["Gemma3ForCausalLM"],
-                "model_type": "gemma3",
-                "vocab_size": int(vocab_size),
-                "hidden_size": int(hidden_size),
-                "intermediate_size": int(intermediate_size),
-                "num_hidden_layers": int(num_hidden_layers),
-                "num_attention_heads": int(num_attention_heads),
-                "num_key_value_heads": int(num_key_value_heads),
-                "head_dim": int(head_dim),
-                "hidden_act": base_cfg.get("hidden_act","gelu"),
-                "max_position_embeddings": int(max_pos),
-                "rms_norm_eps": float(base_cfg.get("rms_norm_eps", 1e-6)),
-                "tie_word_embeddings": bool(base_cfg.get("tie_word_embeddings", True)),
-                "use_cache": True
-            }
-
-            with open(os.path.join(MODEL_DIR, "config.json"), "w", encoding="utf-8") as f:
-                json.dump(hf_cfg, f, indent=2)
-            print("[CONVERT] Wrote config.json (gemma3)")
-
-            # tokenizer files + configs
-            tok_cfg = write_tokenizer_files(MODEL_DIR, TOKENIZER_JSON, base_cfg)
-
-            gen_cfg = {"max_length": tok_cfg.get("model_max_length", max_pos), "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
-            with open(os.path.join(MODEL_DIR, "generation_config.json"), "w", encoding="utf-8") as f:
-                json.dump(gen_cfg, f, indent=2)
-
+        if "gpt_neox.layers.0.mlp.dense_h_to_4h.weight" in out:
+            intermediate_size = out["gpt_neox.layers.0.mlp.dense_h_to_4h.weight"].shape[0]
         else:
-            print(f"[FATAL] Unsupported model_name: {MODEL_NAME}", file=sys.stderr)
-            sys.exit(6)
+            intermediate_size = hidden_size * 4
+
+        def infer_heads(hid):
+            for h in [32, 16, 8, 24, 12, 4, 2]:
+                if hid % h == 0:
+                    return h
+            return max(1, hid // 64) or 8
+
+        def detect_tie(sd_map):
+            try:
+                return sd_map["gpt_neox.embed_out.weight"].data_ptr() == sd_map["gpt_neox.embed_in.weight"].data_ptr()
+            except Exception:
+                return False
+
+        num_heads = int(base_cfg.get("num_attention_heads") or base_cfg.get("num_heads") or infer_heads(hidden_size))
+        max_pos = int(base_cfg.get("max_position_embeddings") or base_cfg.get("max_seq_len") or 512)
+        rotary_pct = float(base_cfg.get("rotary_pct", 0.25))
+        tie_word_embeddings = bool(base_cfg.get("tie_word_embeddings", detect_tie(out)))
+
+        hf_cfg = {
+            "architectures": ["GPTNeoXForCausalLM"],
+            "model_type": "gpt_neox",
+            "vocab_size": int(vocab_size),
+            "hidden_size": int(hidden_size),
+            "intermediate_size": int(intermediate_size),
+            "num_attention_heads": int(num_heads),
+            "num_hidden_layers": int(num_layers),
+            "max_position_embeddings": int(max_pos),
+            "rotary_pct": rotary_pct,
+            "tie_word_embeddings": tie_word_embeddings,
+        }
+
+        with open(os.path.join(MODEL_DIR, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(hf_cfg, f, indent=2)
+        print("[CONVERT] Wrote config.json (gptneox)")
+
+        # if tied, drop embed_out
+        if tie_word_embeddings and "gpt_neox.embed_out.weight" in out:
+            out.pop("gpt_neox.embed_out.weight", None)
+            torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+            print("[CONVERT] Re-saved pytorch_model.bin without embed_out (tied)")
+
+        # tokenizer files + configs
+        tok_cfg = write_tokenizer_files(MODEL_DIR, TOKENIZER_JSON, base_cfg)
+
+        gen_cfg = {"max_length": tok_cfg.get("model_max_length", 512), "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
+        with open(os.path.join(MODEL_DIR, "generation_config.json"), "w", encoding="utf-8") as f:
+            json.dump(gen_cfg, f, indent=2)
 
         # Finally, copy the HF folder to the artifact dir
         print("[CONVERT] Copying HF folder to artifact dir:", OUT_CONVERTED)
@@ -378,8 +246,6 @@ implementation:
       - {inputPath: model_pt}
       - --model_config_json
       - {inputPath: model_config_json}
-      - --model_name
-      - {inputValue: model_name}
       - --max_new_tokens
       - {inputValue: max_new_tokens}
       - --out_converted
