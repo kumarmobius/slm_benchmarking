@@ -264,6 +264,7 @@ implementation:
         gemma_lm = Gemma3LM(model, tokenizer, device=device)
         
         print("[INFO] Serializing with cloudpickle...")
+        os.makedirs(os.path.dirname(args.gemma_lm), exist_ok=True)
         with open(args.gemma_lm, "wb") as f:
             cloudpickle.dump(gemma_lm, f)
         
