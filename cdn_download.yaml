@@ -1,5 +1,4 @@
-name: CDN Download
-description: Downloads trained_model.pt, config.json, and tokenizer.json files from CDN URLs with bearer token auth and URL encoding support.
+name: CDN Download v1
 inputs:
   - {name: pt_url, type: String, description: "URL to fetch the trained_model.pt model file from"}
   - {name: config_url, type: String, description: "URL to fetch the config.json file from"}
@@ -13,6 +12,7 @@ implementation:
   container:
     image: gurpreetgandhi/nesy-factory:vtest4
     command:
+      - -python3 
       - -u
       - -c
       - |
