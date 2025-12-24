@@ -1,5 +1,5 @@
 name: CDN Download
-description: Downloads trained_model.pt, config.json, and tokenizer.json files from CDN URLs with bearer token auth and URL fallback support.
+description: Downloads trained_model.pt, config.json, and tokenizer.json files from CDN URLs with bearer token auth and URL encoding support.
 inputs:
   - {name: pt_url, type: String, description: "URL to fetch the trained_model.pt model file from"}
   - {name: config_url, type: String, description: "URL to fetch the config.json file from"}
@@ -11,15 +11,8 @@ outputs:
   - {name: tokenizer_file, type: Model, description: "Downloaded tokenizer.json file"}
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: gurpreetgandhi/nesy-factory:vtest4
     command:
-      - sh
-      - -c
-      - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet requests || \
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet requests --user
-        exec "$0" "$@"
-      - python3
       - -u
       - -c
       - |
@@ -66,9 +59,6 @@ implementation:
                 os.makedirs(p, exist_ok=True)
 
         def resolve_output_path(output_arg, default_filename):
-            # If the runtime passed a path whose basename is 'data' (common in KFP/Argo),
-            # treat that as the final file path and return it.
-            # Otherwise treat output_arg as a directory and return dir/default_filename.
             base = os.path.basename(output_arg)
             if base == "data":
                 makedirs(os.path.dirname(output_arg) or ".")
@@ -77,48 +67,49 @@ implementation:
                 makedirs(output_arg)
                 return os.path.join(output_arg, default_filename)
 
-        def candidate_urls(url):
-            if "$$$_" in url:
-                return [url, url.replace("$$$_", "$$_")]
-            return [url]
+        def encode_special_chars(url):
+            url = url.replace("$", "%24")
+            url = url.replace("(", "%28")
+            url = url.replace(")", "%29")
+            url = url.replace("[", "%5B")
+            url = url.replace("]", "%5D")
+            url = url.replace("{", "%7B")
+            url = url.replace("}", "%7D")
+            return url
 
         def download_stream_to_file(url, out_file, timeout=300):
-            print(f"Downloading {url} -> {out_file}")
+            encoded_url = encode_special_chars(url)
+            print(f"Original URL: {url}")
+            print(f"Encoded URL: {encoded_url}")
+            print(f"Downloading to: {out_file}")
             makedirs(os.path.dirname(out_file) or ".")
             
-            last_error = None
-            for candidate_url in candidate_urls(url):
-                try:
-                    print(f"Trying URL: {candidate_url}")
-                    with session.get(candidate_url, stream=True, headers=headers, timeout=timeout) as r:
-                        r.raise_for_status()
-                        total = 0
-                        with open(out_file, "wb") as fh:
-                            for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
-                                if chunk:
-                                    fh.write(chunk)
-                                    total += len(chunk)
-                    print(f"Saved {out_file} ({total} bytes)")
-                    return total
-                except requests.exceptions.RequestException as e:
-                    print(f"Download failed for {candidate_url}: {e}")
-                    last_error = e
-            
-            # If all URLs failed, raise the last error
-            print(f"All download attempts failed for {url}")
-            raise last_error
+            try:
+                with session.get(encoded_url, stream=True, headers=headers, timeout=timeout) as r:
+                    r.raise_for_status()
+                    total = 0
+                    with open(out_file, "wb") as fh:
+                        for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                            if chunk:
+                                fh.write(chunk)
+                                total += len(chunk)
+                print(f"Saved {out_file} ({total} bytes)")
+                return total
+            except requests.exceptions.RequestException as e:
+                print(f"Download failed for {encoded_url}: {e}")
+                raise
 
         try:
             print("pt_url:", args.pt_url)
             print("config_url:", args.config_url)
             print("tokenizer_url:", args.tokenizer_url)
 
-            # Resolve final output paths (support both directory-style and runtime 'data' file)
+            # Resolve final output paths
             pt_out = resolve_output_path(args.pt_file, "trained_model.pt")
             cfg_out = resolve_output_path(args.config_file, "config.json")
             tok_out = resolve_output_path(args.tokenizer_file, "tokenizer.json")
 
-            # Download files into those paths with fallback support
+            # Download files with URL encoding
             download_stream_to_file(args.pt_url, pt_out, timeout=600)
             download_stream_to_file(args.config_url, cfg_out, timeout=120)
             download_stream_to_file(args.tokenizer_url, tok_out, timeout=120)
