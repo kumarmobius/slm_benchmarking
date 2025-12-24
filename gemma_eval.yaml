@@ -1,4 +1,4 @@
-name: GemmaLMEval V3
+name: GemmaLMEval V3.1
 description: Evaluate a cloud-pickled Gemma3LM using lm_eval (in-container import patches)
 inputs:
   - name: gemma_model
@@ -32,7 +32,7 @@ implementation:
         import os
         import sys
         import json
-        import cloudpickle
+        import pickle
         import types
         from lm_eval import evaluator
 
@@ -132,9 +132,9 @@ implementation:
                 print(f"[FATAL] gemma_model not found: {args.gemma_model}", file=sys.stderr)
                 sys.exit(2)
 
-            print("[EVAL] Loading Gemma3LM from cloud pickle")
+            print("[EVAL] Loading Gemma3LM from pickle")
             with open(args.gemma_model, "rb") as f:
-                gemma_lm = cloudpickle.load(f)
+                gemma_lm = pickle.load(f)
 
             print("[EVAL] Loaded object type:", type(gemma_lm))
 
