@@ -1,4 +1,4 @@
-name: Build Gemma3LM v2.2
+name: Build Gemma3LM v2.3
 inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
@@ -19,7 +19,8 @@ implementation:
         import os
         import json
         import torch
-        import cloudpickle
+        # import cloudpickle
+        import pickle
         import psutil
         from tokenizers import Tokenizer
         from nesy_factory.language_model.gemma_wrapper import Gemma3LM
@@ -264,10 +265,10 @@ implementation:
         print("[INFO] Creating Gemma3LM wrapper...")
         gemma_lm = Gemma3LM(model, tokenizer, device=device)
         
-        print("[INFO] Serializing with cloudpickle...")
+        print("[INFO] Serializing with pickle...")
         os.makedirs(os.path.dirname(args.gemma_lm), exist_ok=True)
         with open(args.gemma_lm, "wb") as f:
-            cloudpickle.dump(gemma_lm, f)
+            pickle.dump(gemma_lm, f)
         
         print("[OK] Gemma3LM object created and saved successfully")
     args:
