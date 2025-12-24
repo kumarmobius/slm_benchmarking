@@ -1,0 +1,68 @@
+name: Build Gemma3LM
+
+inputs:
+  - { name: tokenizer_json, type: Model, description: "Tokenizer JSON file" }
+  - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
+  - { name: model_config, type: Data, description: "Model config file (json)" }
+
+outputs:
+  - { name: gemma_lm, type: Model, description: "Serialized Gemma3LM object" }
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:vtests3
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import json
+        import torch
+        import cloudpickle
+        from tokenizers import Tokenizer
+        from model import Gemma3Model
+        from lm import Gemma3LM
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--tokenizer_json", required=True)
+        parser.add_argument("--model_pt", required=True)
+        parser.add_argument("--model_config", required=True)
+        parser.add_argument("--gemma_lm", required=True)
+        args = parser.parse_args()
+
+
+        with open(args.model_config, "r") as f:
+            cfg = json.load(f)
+
+        if "qk_norm" in cfg:
+            cfg["qk_norm"] = bool(cfg["qk_norm"])
+
+
+        tokenizer = Tokenizer.from_file(args.tokenizer_json)
+
+
+        model = Gemma3Model(cfg).to("cuda")
+
+        state_dict = torch.load(args.model_pt, map_location="cuda")
+        model.load_state_dict(state_dict, strict=True)
+        model.eval()
+
+
+        gemma_lm = Gemma3LM(model, tokenizer, device="cuda")
+
+
+        with open(args.gemma_lm, "wb") as f:
+            cloudpickle.dump(gemma_lm, f)
+
+        print("[OK] Gemma3LM object created and saved with cloudpickle")
+
+    args:
+      - --tokenizer_json
+      - { inputPath: tokenizer_json }
+      - --model_pt
+      - { inputPath: model_pt }
+      - --model_config
+      - { inputPath: model_config }
+      - --gemma_lm
+      - { outputPath: gemma_lm }
