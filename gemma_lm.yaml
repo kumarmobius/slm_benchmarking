@@ -1,4 +1,4 @@
-name: Build Gemma3LM v2.3
+name: Build Gemma3LM v2.4
 inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
@@ -9,7 +9,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtest4
+    image: kumar2004/gemma-lm-eval:v1
     command:
       - python3
       - -u
