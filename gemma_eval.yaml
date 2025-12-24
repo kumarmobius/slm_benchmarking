@@ -1,4 +1,4 @@
-name: GemmaLMEval V3.2
+name: GemmaLMEval V3.3
 description: Evaluate a cloud-pickled Gemma3LM using lm_eval (in-container import patches)
 inputs:
   - name: gemma_model
@@ -36,55 +36,174 @@ implementation:
         import types
         from lm_eval import evaluator
 
-        # try:
-        #     import torch
-        #     try:
-        #         du = getattr(torch, "_dynamo").utils if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "utils") else None
-        #     except Exception:
-        #         du = None
-
-        #     if du is None:
-        #         # create a minimal structure
-        #         if not hasattr(torch, "_dynamo"):
-        #             torch._dynamo = types.SimpleNamespace()
-        #         torch._dynamo.utils = types.SimpleNamespace()
-        #         torch._dynamo.utils.warn_once = lambda *a, **k: None
-        #         print("[PATCH] Created torch._dynamo.utils.warn_once (fresh)")
-        #     else:
-        #         if not hasattr(du, "warn_once"):
-        #             du.warn_once = lambda *a, **k: None
-        #             print("[PATCH] Injected torch._dynamo.utils.warn_once")
-
-        #     # patch torch._inductor.config.max_autotune_gemm_search_space if missing
-        #     try:
-        #         ind = getattr(torch, "_inductor", None)
-        #     except Exception:
-        #         ind = None
-
-        #     if ind is None:
-        #         # create minimal inductor module + config
-        #         torch._inductor = types.SimpleNamespace()
-        #         torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
-        #         print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
-        #     else:
-        #         cfg = getattr(torch._inductor, "config", None)
-        #         if cfg is None:
-        #             torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
-        #             print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
-        #         else:
-        #             if not hasattr(cfg, "max_autotune_gemm_search_space"):
-        #                 setattr(torch._inductor.config, "max_autotune_gemm_search_space", "NONE")
-        #                 print("[PATCH] Set torch._inductor.config.max_autotune_gemm_search_space='NONE'")
-
-        # except Exception as e:
-        #     print("[PATCH] torch patch skipped (could not import torch or set attributes):", repr(e))
-
-        # # Now safe-ish to import lm_eval / transformers related modules
-        # try:
-        #     from lm_eval import evaluator
-        # except Exception as e:
-        #     print("[FATAL] Failed to import lm_eval after patches:", repr(e), file=sys.stderr)
-        #     raise
+        def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
+            assert head_dim % 2 == 0
+            inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
+            positions = torch.arange(context_length, dtype=dtype)
+            angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)
+            angles = torch.cat((angles, angles), dim=1)
+            return torch.cos(angles), torch.sin(angles)
+        
+        def apply_rope(x, cos, sin):
+            *_, seq_len, head_dim = x.size()
+            x1, x2 = x[..., :head_dim//2], x[..., head_dim//2:]
+            cos_seq = cos[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
+            sin_seq = sin[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
+            rotated = torch.cat((-x2, x1), dim=-1)
+            return (x * cos_seq) + (rotated * sin_seq)
+        
+        class RMSNorm(nn.Module):
+            def __init__(self, emb_dim, eps=1e-6, bias=False):
+                super().__init__()
+                self.eps = eps
+                self.scale = nn.Parameter(torch.zeros(emb_dim))
+                self.shift = nn.Parameter(torch.zeros(emb_dim)) if bias else None
+            
+            def forward(self, x):
+                orig_dtype = x.dtype
+                x_f = x.float()
+                var = x_f.pow(2).mean(dim=-1, keepdim=True)
+                x_norm = x_f * torch.rsqrt(var + self.eps)
+                out = x_norm * (1.0 + self.scale.float())
+                if self.shift is not None:
+                    out = out + self.shift.float()
+                return out.to(orig_dtype)
+        
+        class GroupedQueryAttention(nn.Module):
+            def __init__(self, d_in, num_heads, num_kv_groups, head_dim=None, qk_norm=False, query_pre_attn_scalar=None, dtype=None):
+                super().__init__()
+                assert num_heads % num_kv_groups == 0
+                self.num_heads = num_heads
+                self.num_kv_groups = num_kv_groups
+                self.group_size = num_heads // num_kv_groups
+                self.head_dim = head_dim if head_dim is not None else d_in // num_heads
+                self.scaling = (query_pre_attn_scalar ** -0.5) if (query_pre_attn_scalar is not None) else (self.head_dim ** -0.5)
+                self.W_query = nn.Linear(d_in, num_heads * self.head_dim, bias=False, dtype=dtype)
+                self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+                self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+                self.out_proj = nn.Linear(num_heads * self.head_dim, d_in, bias=False, dtype=dtype)
+                self.q_norm = RMSNorm(self.head_dim) if qk_norm else None
+                self.k_norm = RMSNorm(self.head_dim) if qk_norm else None
+            
+            def forward(self, x, cos, sin, mask=None):
+                B, T, _ = x.shape
+                q = self.W_query(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+                k = self.W_key(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
+                v = self.W_value(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
+                if self.q_norm is not None:
+                    q = self.q_norm(q)
+                if self.k_norm is not None:
+                    k = self.k_norm(k)
+                q = apply_rope(q, cos, sin)
+                k = apply_rope(k, cos, sin)
+                k = k.repeat_interleave(self.group_size, dim=1)
+                v = v.repeat_interleave(self.group_size, dim=1)
+                attn = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
+                if mask is not None:
+                    attn = attn.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+                p = torch.softmax(attn, dim=-1)
+                out = torch.matmul(p, v).transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_dim)
+                return self.out_proj(out)
+        
+        class FeedForward(nn.Module):
+            def __init__(self, cfg):
+                super().__init__()
+                emb_dim = cfg["emb_dim"]
+                hidden_dim = cfg["hidden_dim"]
+                dtype = cfg["dtype"]
+                self.fc1 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
+                self.fc2 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
+                self.fc3 = nn.Linear(hidden_dim, emb_dim, bias=False, dtype=dtype)
+            
+            def forward(self, x):
+                return self.fc3(F.gelu(self.fc1(x)) * self.fc2(x))
+        
+        class TransformerBlock(nn.Module):
+            def __init__(self, cfg, layer_type):
+                super().__init__()
+                self.layer_type = layer_type
+                self.attn = GroupedQueryAttention(
+                    d_in=cfg["emb_dim"],
+                    num_heads=cfg["n_heads"],
+                    num_kv_groups=cfg.get("n_kv_groups", 1),
+                    head_dim=cfg["head_dim"],
+                    qk_norm=cfg.get("qk_norm", False),
+                    query_pre_attn_scalar=cfg.get("query_pre_attn_scalar", None),
+                    dtype=cfg["dtype"]
+                )
+                self.input_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.post_attn_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.pre_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.post_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.ffn = FeedForward(cfg)
+            
+            def forward(self, x, cos, sin, mask=None):
+                residual = x
+                x = self.input_norm(x)
+                x = self.post_attn_norm(self.attn(x, cos, sin, mask) + residual)
+                residual = x
+                x = self.pre_ff_norm(x)
+                x = self.post_ff_norm(self.ffn(x) + residual)
+                return x
+        
+        class Gemma3Model(nn.Module):
+            def __init__(self, cfg):
+                super().__init__()
+                self.cfg = cfg
+                vocab_size = cfg["vocab_size"]
+                emb_dim = cfg["emb_dim"]
+                self.token_emb = nn.Embedding(vocab_size, emb_dim, dtype=cfg["dtype"])
+                self.blocks = nn.ModuleList([
+                    TransformerBlock(cfg, layer_type=cfg["layer_types"][i])
+                    for i in range(cfg["n_layers"])
+                ])
+                self.final_norm = RMSNorm(emb_dim, eps=cfg.get("rms_norm_eps", 1e-6))
+                self.out_head = nn.Linear(emb_dim, vocab_size, bias=False, dtype=cfg["dtype"])
+                self.cos_global, self.sin_global = compute_rope_params(
+                    cfg["head_dim"], cfg["rope_base"], cfg["context_length"], torch.float32
+                )
+                self.cos_local, self.sin_local = compute_rope_params(
+                    cfg["head_dim"], cfg["rope_local_base"], cfg["sliding_window"], torch.float32
+                )
+            
+            def _ensure_rope_on_device(self, device):
+                if self.cos_global.device != device:
+                    self.cos_global = self.cos_global.to(device)
+                    self.sin_global = self.sin_global.to(device)
+                if self.cos_local.device != device:
+                    self.cos_local = self.cos_local.to(device)
+                    self.sin_local = self.sin_local.to(device)
+            
+            def forward(self, input_ids, labels=None):
+                x = self.token_emb(input_ids).to(self.cfg["dtype"])
+                B, T, _ = x.size()
+                device = x.device
+                self._ensure_rope_on_device(device)
+                
+                mask_full = torch.tril(torch.ones((T, T), dtype=torch.bool, device=device))
+                window = self.cfg["sliding_window"]
+                mask_sliding = torch.zeros((T, T), dtype=torch.bool, device=device)
+                for i in range(T):
+                    start = max(0, i - window + 1)
+                    mask_sliding[i, start:i+1] = True
+                
+                for i, block in enumerate(self.blocks):
+                    if self.cfg["layer_types"][i] == "sliding_attention":
+                        x = block(x, self.cos_local, self.sin_local, mask_sliding)
+                    else:
+                        x = block(x, self.cos_global, self.sin_global, mask_full)
+                
+                x = self.final_norm(x)
+                logits = self.out_head(x)
+                
+                loss = None
+                if labels is not None:
+                    loss = F.cross_entropy(
+                        logits.view(-1, logits.size(-1)),
+                        labels.view(-1),
+                        reduction="mean"
+                    )
+                return logits, loss
 
         def main():
             parser = argparse.ArgumentParser(
