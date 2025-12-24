@@ -22,7 +22,7 @@ outputs:
     description: Evaluation results JSON
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtest4
+    image: kumar2004/latest:v4
     command:
       - python3
       - -u
@@ -34,56 +34,57 @@ implementation:
         import json
         import cloudpickle
         import types
+        from lm_eval import evaluator
 
-        try:
-            import torch
-            try:
-                du = getattr(torch, "_dynamo").utils if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "utils") else None
-            except Exception:
-                du = None
+        # try:
+        #     import torch
+        #     try:
+        #         du = getattr(torch, "_dynamo").utils if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "utils") else None
+        #     except Exception:
+        #         du = None
 
-            if du is None:
-                # create a minimal structure
-                if not hasattr(torch, "_dynamo"):
-                    torch._dynamo = types.SimpleNamespace()
-                torch._dynamo.utils = types.SimpleNamespace()
-                torch._dynamo.utils.warn_once = lambda *a, **k: None
-                print("[PATCH] Created torch._dynamo.utils.warn_once (fresh)")
-            else:
-                if not hasattr(du, "warn_once"):
-                    du.warn_once = lambda *a, **k: None
-                    print("[PATCH] Injected torch._dynamo.utils.warn_once")
+        #     if du is None:
+        #         # create a minimal structure
+        #         if not hasattr(torch, "_dynamo"):
+        #             torch._dynamo = types.SimpleNamespace()
+        #         torch._dynamo.utils = types.SimpleNamespace()
+        #         torch._dynamo.utils.warn_once = lambda *a, **k: None
+        #         print("[PATCH] Created torch._dynamo.utils.warn_once (fresh)")
+        #     else:
+        #         if not hasattr(du, "warn_once"):
+        #             du.warn_once = lambda *a, **k: None
+        #             print("[PATCH] Injected torch._dynamo.utils.warn_once")
 
-            # patch torch._inductor.config.max_autotune_gemm_search_space if missing
-            try:
-                ind = getattr(torch, "_inductor", None)
-            except Exception:
-                ind = None
+        #     # patch torch._inductor.config.max_autotune_gemm_search_space if missing
+        #     try:
+        #         ind = getattr(torch, "_inductor", None)
+        #     except Exception:
+        #         ind = None
 
-            if ind is None:
-                # create minimal inductor module + config
-                torch._inductor = types.SimpleNamespace()
-                torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
-                print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
-            else:
-                cfg = getattr(torch._inductor, "config", None)
-                if cfg is None:
-                    torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
-                    print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
-                else:
-                    if not hasattr(cfg, "max_autotune_gemm_search_space"):
-                        setattr(torch._inductor.config, "max_autotune_gemm_search_space", "NONE")
-                        print("[PATCH] Set torch._inductor.config.max_autotune_gemm_search_space='NONE'")
+        #     if ind is None:
+        #         # create minimal inductor module + config
+        #         torch._inductor = types.SimpleNamespace()
+        #         torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
+        #         print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
+        #     else:
+        #         cfg = getattr(torch._inductor, "config", None)
+        #         if cfg is None:
+        #             torch._inductor.config = types.SimpleNamespace(max_autotune_gemm_search_space="NONE")
+        #             print("[PATCH] Created torch._inductor.config with max_autotune_gemm_search_space='NONE'")
+        #         else:
+        #             if not hasattr(cfg, "max_autotune_gemm_search_space"):
+        #                 setattr(torch._inductor.config, "max_autotune_gemm_search_space", "NONE")
+        #                 print("[PATCH] Set torch._inductor.config.max_autotune_gemm_search_space='NONE'")
 
-        except Exception as e:
-            print("[PATCH] torch patch skipped (could not import torch or set attributes):", repr(e))
+        # except Exception as e:
+        #     print("[PATCH] torch patch skipped (could not import torch or set attributes):", repr(e))
 
-        # Now safe-ish to import lm_eval / transformers related modules
-        try:
-            from lm_eval import evaluator
-        except Exception as e:
-            print("[FATAL] Failed to import lm_eval after patches:", repr(e), file=sys.stderr)
-            raise
+        # # Now safe-ish to import lm_eval / transformers related modules
+        # try:
+        #     from lm_eval import evaluator
+        # except Exception as e:
+        #     print("[FATAL] Failed to import lm_eval after patches:", repr(e), file=sys.stderr)
+        #     raise
 
         def main():
             parser = argparse.ArgumentParser(
