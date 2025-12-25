@@ -1,5 +1,4 @@
 name: GemmaLMEval V3.5
-description: Evaluate a cloud-pickled Gemma3LM using lm_eval (in-container import patches)
 inputs:
   - name: gemma_model
     type: Model
@@ -273,7 +272,7 @@ implementation:
                 limit=args.limit
             )
 
-            print(+"=" * 50)
+            print("=" * 50)
             print("RESULTS:")
             print("=" * 50)
             for key, value in results.get("results", {}).items():
