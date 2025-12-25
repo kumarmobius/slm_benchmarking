@@ -1,4 +1,4 @@
-name: GemmaLMEval V3.4
+name: GemmaLMEval V3.5
 description: Evaluate a cloud-pickled Gemma3LM using lm_eval (in-container import patches)
 inputs:
   - name: gemma_model
@@ -34,6 +34,7 @@ implementation:
         import json
         import pickle
         import types
+        import torch
         from lm_eval import evaluator
         import torch.nn as nn
         import torch.nn.functional as F
