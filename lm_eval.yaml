@@ -1,36 +1,58 @@
-name: BenchmarksEvals v1
+name: BenchmarksEvals v2
 description: |
-  Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
+  Evaluate a Hugging Face model on multiple lm_eval tasks with configurable parameters.
+  Supports GPQA, MMLU Pro, BBH, Math, IFEval and other lm-evaluation-harness tasks.
 inputs:
   - name: converted_model
     type: Model
+    description: "Path to the Hugging Face model directory"
   - name: hf_token
     type: String
     default: ""
+    description: "Hugging Face authentication token for gated datasets/models"
   - name: tasks
     type: String
     default: "gpqa,mmlu_pro,bbh,math,ifeval"
+    description: "Comma-separated list of tasks to evaluate"
+  - name: limit
+    type: Integer
+    default: 100
+    description: "Number of examples to evaluate per task (use null for all examples)"
+  - name: batch_size
+    type: Integer
+    default: 6
+    description: "Batch size for evaluation"
+  - name: num_fewshot
+    type: Integer
+    default: 0
+    description: "Number of few-shot examples to use for evaluation"
+
 outputs:
   - name: compact_metrics
     type: Data
+    description: "Compact JSON with key metrics per task"
   - name: full_results
     type: Data
+    description: "Full evaluation results with all details"
   - name: emissions_csv
     type: Data
-  - name: logs
-    type: Data
+    description: "CO2 emissions tracking CSV from codecarbon"
   - name: schema_json
     type: String
+    description: "Schema-formatted JSON with percentage scores"
 
 implementation:
   container:
-    image: kumar2004/latest:v4
+    image: kumar2004/gemma-lm-eval:v1
     command:
-      - bash
-      - -lc
+      - sh
+      - -c
       - |
-
-        cat > /tmp/hf_eval.py <<'PY'
+        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' --user) && "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
         import argparse
         import os
         import json
@@ -51,71 +73,91 @@ implementation:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
 
-        log("Starting hf_eval script")
+        log("Starting BenchmarksEvals v2")
 
+        # Parse arguments
         parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
-        parser.add_argument("--converted_model", required=True)
-        parser.add_argument("--hf_token", default="")
-        parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval")
-        parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
-        parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
-        parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
-        parser.add_argument("--out_schema", default="/tmp/outputs/schema.json")
+        parser.add_argument("--converted_model", required=True, help="Path to HF model directory")
+        parser.add_argument("--hf_token", default="", help="HuggingFace authentication token")
+        parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval", help="Comma-separated tasks")
+        parser.add_argument("--limit", type=int, default=100, help="Number of examples per task")
+        parser.add_argument("--batch_size", type=int, default=6, help="Batch size for evaluation")
+        parser.add_argument("--num_fewshot", type=int, default=0, help="Number of few-shot examples")
+        parser.add_argument("--out_compact", required=True, help="Output path for compact metrics")
+        parser.add_argument("--out_full", required=True, help="Output path for full results")
+        parser.add_argument("--out_emissions", required=True, help="Output path for emissions CSV")
+        parser.add_argument("--out_schema", required=True, help="Output path for schema JSON")
         args = parser.parse_args()
 
-        log(f"Parsed args: converted_model={args.converted_model}, tasks={args.tasks}")
+        log(f"Configuration:")
+        log(f"  Model: {args.converted_model}")
+        log(f"  Tasks: {args.tasks}")
+        log(f"  Limit: {args.limit}")
+        log(f"  Batch size: {args.batch_size}")
+        log(f"  Few-shot: {args.num_fewshot}")
+
+        # Setup paths
         CONVERTED = os.path.abspath(args.converted_model)
         OUT_COMPACT = os.path.abspath(args.out_compact)
         OUT_FULL = os.path.abspath(args.out_full)
         OUT_EMISSIONS = os.path.abspath(args.out_emissions)
         OUT_SCHEMA = os.path.abspath(args.out_schema)
 
-        # Ensure parent dirs exist
-        for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), os.path.dirname(OUT_SCHEMA)]:
-            if p:
-                os.makedirs(p, exist_ok=True)
-                log(f"Ensured directory exists: {p}")
+        # Ensure output directories exist
+        for path in [OUT_COMPACT, OUT_FULL, OUT_EMISSIONS, OUT_SCHEMA]:
+            parent_dir = os.path.dirname(path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+                log(f"Ensured directory exists: {parent_dir}")
 
-        TOKEN = args.hf_token or ""
+        # Setup Hugging Face authentication
+        TOKEN = args.hf_token.strip()
         if TOKEN:
             os.environ["HUGGINGFACE_HUB_TOKEN"] = TOKEN
             os.environ["HF_TOKEN"] = TOKEN
             HfFolder.save_token(TOKEN)
-            log("Saved Hugging Face token for gated dataset access")
+            log("✓ Saved Hugging Face token for authentication")
+        else:
+            log("⚠ No HF token provided - gated datasets/models may not be accessible")
 
+        # Setup cache directories
         os.environ.update({
             "HF_HUB_DISABLE_TELEMETRY": "1",
-            # local cache locations internal to the container
             "HF_HOME": "/tmp/hf_cache",
             "HF_DATASETS_CACHE": "/tmp/hf_cache",
             "HUGGINGFACE_HUB_CACHE": "/tmp/hf_cache"
         })
+        log("✓ Configured HuggingFace cache directories")
 
-        # Determine TASKS. Use TaskManager for math autodetection if requested.
+        # Parse and validate tasks
         tm = None
         try:
             tm = TaskManager()
             avail = set(tm.task_index)
             math_tasks = sorted([t for t in avail if "math" in t.lower() or "hendrycks_math" in t.lower()])
             log(f"Available math tasks: {math_tasks}")
-        except Exception as _e:
-            log(f"Failed to build TaskManager for math autodetection: {_e}")
+        except Exception as e:
+            log(f"⚠ Failed to build TaskManager for math autodetection: {e}")
             math_tasks = []
 
         req_tasks = args.tasks.strip()
         if req_tasks.lower() in ("math", "math_auto"):
             TASKS = [t for t in math_tasks if "hendrycks_math" in t.lower()] or ["hendrycks_math"]
-            log(f"Selected math TASKS: {TASKS}")
+            log(f"Selected math tasks: {TASKS}")
         else:
             TASKS = [t.strip() for t in req_tasks.split(",") if t.strip()]
 
+        log(f"Will evaluate {len(TASKS)} task(s): {TASKS}")
+
+        # Composite group for averaging
         COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
 
+        # Preload datasets that need special handling
         PRELOAD_MAP = {
             "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
         }
 
-        def _preload_for_task(task):
+        def preload_for_task(task):
             task_key = task.lower()
             entries = PRELOAD_MAP.get(task_key)
             if not entries:
@@ -123,67 +165,71 @@ implementation:
             ok_any = False
             for repo, split in entries:
                 try:
-                    log(f"Preloading dataset {repo} split={split} (cache_dir=/tmp/hf_cache)")
+                    log(f"Preloading dataset {repo} split={split}")
                     try:
                         load_dataset(repo, split, cache_dir="/tmp/hf_cache", token=TOKEN)
                     except TypeError:
                         load_dataset(repo, split, cache_dir="/tmp/hf_cache", use_auth_token=TOKEN)
-                    log(f"Preloaded {repo}::{split}")
+                    log(f"✓ Preloaded {repo}::{split}")
                     ok_any = True
                 except Exception as e:
-                    log(f"Preload failed for {repo}::{split}: {e}")
+                    log(f"⚠ Preload failed for {repo}::{split}: {e}")
             return ok_any
 
-        # Log system RAM and disk before heavy operations
+        # Log system resources
         try:
             mem = psutil.virtual_memory()
-            log(f" Total RAM: {mem.total / 1e9:.2f} GB")
-            log(f"Available RAM: {mem.available / 1e9:.2f} GB")
+            log(f"System RAM: {mem.total / 1e9:.2f} GB total, {mem.available / 1e9:.2f} GB available")
         except Exception as e:
-            log(f"Failed to read RAM info: {e}")
+            log(f"⚠ Failed to read RAM info: {e}")
 
         try:
             total, used, free = shutil.disk_usage("/")
-            log(f" Total storage (root): {total / 1e9:.2f} GB")
-            log(f" Free storage (root): {free / 1e9:.2f} GB")
+            log(f"Storage: {total / 1e9:.2f} GB total, {free / 1e9:.2f} GB free")
         except Exception as e:
-            log(f"Failed to read disk info: {e}")
+            log(f"⚠ Failed to read disk info: {e}")
 
-        log(f"Starting emissions tracker -> {OUT_EMISSIONS}")
-        tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or ".", output_file=os.path.basename(OUT_EMISSIONS))
+        # Start emissions tracking
+        log(f"Starting CO2 emissions tracker -> {OUT_EMISSIONS}")
+        tracker = EmissionsTracker(
+            output_dir=os.path.dirname(OUT_EMISSIONS) or ".",
+            output_file=os.path.basename(OUT_EMISSIONS)
+        )
         tracker.start()
 
-        log(f"Loading tokenizer + model from: {CONVERTED}")
-        tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
-        _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
-        log("Tokenizer and model loaded")
+        # Load model and tokenizer
+        log(f"Loading tokenizer and model from: {CONVERTED}")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
+            model = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
+            log("✓ Model and tokenizer loaded successfully")
+        except Exception as e:
+            log(f"✗ Failed to load model: {e}")
+            raise
 
-        # GPU / CPU reporting
+        # Detect device (GPU/CPU)
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
             log(f"CUDA visible devices: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
-            log(f"torch reports {gpu_count} CUDA device(s).")
+            log(f"Detected {gpu_count} CUDA device(s)")
             for i in range(gpu_count):
                 try:
                     name = torch.cuda.get_device_name(i)
-                except Exception:
-                    name = "<unknown>"
-                try:
                     cap = torch.cuda.get_device_capability(i)
-                except Exception:
-                    cap = ("?", "?")
-                try:
                     total_mem = torch.cuda.get_device_properties(i).total_memory / 1e9
-                except Exception:
-                    total_mem = None
-                log(f"  GPU {i}: {name}  |  capability: {cap}  |  total_mem_gb: {total_mem}")
+                    log(f"  GPU {i}: {name} | Capability: {cap} | Memory: {total_mem:.2f} GB")
+                except Exception as e:
+                    log(f"  GPU {i}: <error reading properties: {e}>")
             eval_device = "cuda:0"
         else:
-            log("CUDA not available — using CPU")
+            log("⚠ CUDA not available - using CPU (this will be slow)")
             eval_device = "cpu"
-        log(f"Using device string for lm_eval: {eval_device}")
 
+        log(f"Evaluation device: {eval_device}")
+
+        # Helper functions
         def safe_json(obj):
+            """Convert objects to JSON-serializable format"""
             if isinstance(obj, dict):
                 return {k: safe_json(v) for k, v in obj.items()}
             if isinstance(obj, (list, tuple)):
@@ -203,175 +249,212 @@ implementation:
             except Exception:
                 return str(obj)
 
-        def pick_metric(d):
-            for k in ("acc_norm", "acc", "accuracy"):
-                if k in d and isinstance(d[k], (int, float)):
-                    return k, float(d[k])
-            for k, v in d.items():
-                if isinstance(v, (int, float)):
-                    return k, float(v)
+        def pick_metric(result_dict):
+            """Extract the primary metric from a result dictionary"""
+            for key in ("acc_norm", "acc", "accuracy"):
+                if key in result_dict and isinstance(result_dict[key], (int, float)):
+                    return key, float(result_dict[key])
+            for key, value in result_dict.items():
+                if isinstance(value, (int, float)):
+                    return key, float(value)
             return None, None
 
+        # Run evaluations
         compact_results = {}
         full_results = {}
-
         total_tasks = len(TASKS)
-        log(f"Will run {total_tasks} task(s): {TASKS}")
+
+        log("=" * 70)
+        log(f"Starting evaluation of {total_tasks} task(s)")
+        log("=" * 70)
 
         for idx, task in enumerate(TASKS, start=1):
-            log(f"=== Starting task {idx}/{total_tasks}: {task} ===")
-            _preload_for_task(task)
-            start_t = time.time()
+            log(f"\n{'=' * 70}")
+            log(f"Task {idx}/{total_tasks}: {task}")
+            log(f"{'=' * 70}")
+            
+            # Preload datasets if needed
+            preload_for_task(task)
+            
+            start_time = time.time()
             try:
-                model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
-                res = evaluator.simple_evaluate(
+                model_args_str = f"pretrained={CONVERTED},tokenizer={CONVERTED},trust_remote_code=False"
+                
+                log(f"Running evaluation with:")
+                log(f"  - Batch size: {args.batch_size}")
+                log(f"  - Few-shot: {args.num_fewshot}")
+                log(f"  - Limit: {args.limit}")
+                
+                result = evaluator.simple_evaluate(
                     model="hf",
                     model_args=model_args_str,
                     tasks=[task],
-                    batch_size="6",
+                    batch_size=str(args.batch_size),
                     device=eval_device,
-                    num_fewshot=0,
-                    limit=100,
+                    num_fewshot=args.num_fewshot,
+                    limit=args.limit,
                 )
-                duration = time.time() - start_t
-                full_results[task] = safe_json(res)
-                results_dict = res.get("results", {})
-                task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
+                
+                duration = time.time() - start_time
+                full_results[task] = safe_json(result)
+                
+                # Extract metrics
+                results_dict = result.get("results", {})
+                task_result = results_dict.get(task) or (
+                    next(iter(results_dict.values())) if results_dict else None
+                )
 
                 if isinstance(task_result, dict):
                     metric_name, metric_value = pick_metric(task_result)
                     if metric_name is not None:
-                        compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
-                        log(f"Task {task} succeeded: {metric_name} = {metric_value}  (time {duration:.1f}s)")
+                        compact_results[task] = {
+                            metric_name: metric_value,
+                            "time_s": round(duration, 3)
+                        }
+                        log(f"✓ Task completed: {metric_name} = {metric_value:.4f} ({duration:.1f}s)")
                     else:
-                        compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
-                        log(f"Task {task}: no numeric metric found  (time {duration:.1f}s)")
+                        compact_results[task] = {
+                            "note": "no numeric metric found",
+                            "time_s": round(duration, 3)
+                        }
+                        log(f"⚠ Task completed but no numeric metric found ({duration:.1f}s)")
                 else:
-                    compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
-                    log(f"Task {task}: unexpected result structure  (time {duration:.1f}s)")
+                    compact_results[task] = {
+                        "note": "unexpected result structure",
+                        "raw": safe_json(task_result),
+                        "time_s": round(duration, 3)
+                    }
+                    log(f"⚠ Task completed with unexpected result structure ({duration:.1f}s)")
 
             except Exception as e:
-                duration = time.time() - start_t
+                duration = time.time() - start_time
                 tb = traceback.format_exc()
-                log(f"Task {task} failed with exception: {e}")
+                log(f"✗ Task failed with exception: {e}")
                 print(tb, flush=True)
-                compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
-                full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
+                compact_results[task] = {
+                    "error": str(e),
+                    "time_s": round(duration, 3)
+                }
+                full_results[task] = {
+                    "error": str(e),
+                    "traceback": tb,
+                    "time_s": round(duration, 3)
+                }
 
+        # Stop emissions tracking
+        log("\nStopping emissions tracker...")
         emissions = tracker.stop()
-        # codecarbon returns kg (float or numpy); coerce to float
+        
         try:
             emissions_val = float(emissions)
+            co2_str = f"{emissions_val:.4f} kg"
         except Exception:
-            emissions_val = None
-
-        # format CO2 string as requested
-        def format_co2_str(val):
-            try:
-                return f"{float(val):.4f} kg"
-            except Exception:
-                return None
-
-        co2_str = format_co2_str(emissions_val)
+            co2_str = "N/A"
+        
         compact_results["co2_emissions_kg"] = co2_str
         full_results["co2_emissions_kg"] = co2_str
-        log(f"Emissions recorded: {co2_str}")
+        log(f"✓ CO2 emissions: {co2_str}")
 
-        # compute composite mean over COMPOSITE_GROUP if possible
+        # Compute composite mean over defined group
         found_vals = []
-        for t in COMPOSITE_GROUP:
-            entry = compact_results.get(t)
+        for task in COMPOSITE_GROUP:
+            entry = compact_results.get(task)
             if isinstance(entry, dict):
-                for k, v in entry.items():
-                    if k == "time_s" or k.startswith("note") or k == "error":
+                for key, value in entry.items():
+                    if key in ("time_s", "error") or key.startswith("note"):
                         continue
-                    if isinstance(v, (int, float)):
-                        found_vals.append(float(v))
+                    if isinstance(value, (int, float)):
+                        found_vals.append(float(value))
                         break
 
         if found_vals:
             composite_score = float(np.mean(found_vals))
             compact_results["composite_mean"] = round(composite_score, 6)
-            log(f"Composite mean over {COMPOSITE_GROUP}: {composite_score}")
+            log(f"✓ Composite mean ({COMPOSITE_GROUP}): {composite_score:.4f}")
 
-        # combine all math task scores and compute mean
+        # Compute math tasks mean
         math_scores = []
-        for t_name, entry in compact_results.items():
-            if "math" in t_name.lower():
+        for task_name, entry in compact_results.items():
+            if "math" in task_name.lower():
                 if isinstance(entry, dict):
-                    for k, v in entry.items():
-                        if k == "time_s" or k.startswith("note") or k == "error":
+                    for key, value in entry.items():
+                        if key in ("time_s", "error") or key.startswith("note"):
                             continue
-                        if isinstance(v, (int, float)):
-                            math_scores.append(float(v))
+                        if isinstance(value, (int, float)):
+                            math_scores.append(float(value))
                             break
+        
         if math_scores:
             math_mean = float(np.mean(math_scores))
             compact_results["math_mean"] = round(math_mean, 6)
-            log(f"Math tasks mean across detected math tasks ({[t for t in compact_results.keys() if 'math' in t.lower()]}): {math_mean}")
+            log(f"✓ Math tasks mean: {math_mean:.4f}")
 
-        # Build schema-style JSON: each task -> rounded percent score (if available), plus co2 (string)
+        # Build schema JSON (percentage format)
         schema = {}
         for task, entry in compact_results.items():
             if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
                 continue
             if isinstance(entry, dict):
-                # find first numeric metric
-                for k, v in entry.items():
-                    if isinstance(v, (int, float)) and k != "time_s":
+                for key, value in entry.items():
+                    if isinstance(value, (int, float)) and key != "time_s":
                         try:
-                            # multiply by 100 to convert to percentage-style value
-                            schema[task] = round(float(v) * 100.0, 2)
+                            # Convert to percentage
+                            schema[task] = round(float(value) * 100.0, 2)
                         except Exception:
                             pass
                         break
-        try:
-            if compact_results.get("co2_emissions_kg") is not None:
-                schema["co2_emissions_kg"] = compact_results["co2_emissions_kg"]
-        except Exception:
-            schema["co2_emissions_kg"] = compact_results.get("co2_emissions_kg")
+        
+        if compact_results.get("co2_emissions_kg"):
+            schema["co2_emissions_kg"] = compact_results["co2_emissions_kg"]
 
-        # Save outputs
+        # Save all outputs
+        log("\nSaving results...")
+        
         try:
             with open(OUT_COMPACT, "w") as f:
                 json.dump(safe_json(compact_results), f, indent=2)
-            log(f"Saved compact summary to: {OUT_COMPACT}")
+            log(f"✓ Compact metrics: {OUT_COMPACT}")
         except Exception as e:
-            log(f"Failed to save compact summary: {e}")
+            log(f"✗ Failed to save compact metrics: {e}")
 
         try:
             with open(OUT_FULL, "w") as f:
                 json.dump(safe_json(full_results), f, indent=2)
-            log(f"Saved full results to: {OUT_FULL}")
+            log(f"✓ Full results: {OUT_FULL}")
         except Exception as e:
-            log(f"Failed to save full results: {e}")
+            log(f"✗ Failed to save full results: {e}")
 
         try:
             with open(OUT_SCHEMA, "w") as f:
                 json.dump(schema, f, indent=2)
-            log(f"Saved schema JSON to: {OUT_SCHEMA}")
+            log(f"✓ Schema JSON: {OUT_SCHEMA}")
         except Exception as e:
-            log(f"Failed to save schema JSON: {e}")
+            log(f"✗ Failed to save schema JSON: {e}")
 
-        # Print readable metrics + single-line machine JSON for easy extraction
+        # Print summary
+        log("\n" + "=" * 70)
+        log("EVALUATION SUMMARY")
+        log("=" * 70)
+        
         for task, data in compact_results.items():
             if isinstance(data, dict):
                 metric_name = None
                 metric_value = None
-                for k, v in data.items():
-                    if k == "time_s" or k.startswith("note") or k == "error":
+                for key, value in data.items():
+                    if key in ("time_s", "error") or key.startswith("note"):
                         continue
-                    if isinstance(v, (int, float)):
-                        metric_name = k
-                        metric_value = v
+                    if isinstance(value, (int, float)):
+                        metric_name = key
+                        metric_value = value
                         break
                 if metric_name is not None:
-                    log(f"metric: {task} -> {metric_name}: {metric_value}")
+                    log(f"{task}: {metric_name} = {metric_value:.4f}")
                 else:
-                    log(f"metric: {task} -> no numeric metric (entry={data})")
+                    log(f"{task}: {data}")
             else:
-                log(f"metric: {task} -> unexpected entry: {data}")
+                log(f"{task}: {data}")
 
+        # Print machine-readable JSON for parsing
         try:
             metric_payload = {
                 "compact": safe_json(compact_results),
@@ -380,16 +463,15 @@ implementation:
                 "schema": schema
             }
         except Exception:
-            metric_payload = {k: round(v, 2) if isinstance(v, (int, float)) else v for k, v in results.items()}
+            metric_payload = compact_results
 
         metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False)
         print(metric_line, flush=True)
         import sys
         print(metric_line, file=sys.stderr, flush=True)
 
-        log("hf_eval script completed")
-        PY
-        exec python3 -u /tmp/hf_eval.py "$0" "$@"
+        log("\n✓ BenchmarksEvals v2 completed successfully")
+
     args:
       - --converted_model
       - {inputPath: converted_model}
@@ -397,6 +479,12 @@ implementation:
       - {inputValue: hf_token}
       - --tasks
       - {inputValue: tasks}
+      - --limit
+      - {inputValue: limit}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_fewshot
+      - {inputValue: num_fewshot}
       - --out_compact
       - {outputPath: compact_metrics}
       - --out_full
