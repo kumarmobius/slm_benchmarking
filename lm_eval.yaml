@@ -1,7 +1,4 @@
 name: BenchmarksEvals v2
-description: |
-  Evaluate a Hugging Face model on multiple lm_eval tasks with configurable parameters.
-  Supports GPQA, MMLU Pro, BBH, Math, IFEval and other lm-evaluation-harness tasks.
 inputs:
   - name: converted_model
     type: Model
@@ -229,7 +226,6 @@ implementation:
 
         # Helper functions
         def safe_json(obj):
-            """Convert objects to JSON-serializable format"""
             if isinstance(obj, dict):
                 return {k: safe_json(v) for k, v in obj.items()}
             if isinstance(obj, (list, tuple)):
@@ -250,7 +246,6 @@ implementation:
                 return str(obj)
 
         def pick_metric(result_dict):
-            """Extract the primary metric from a result dictionary"""
             for key in ("acc_norm", "acc", "accuracy"):
                 if key in result_dict and isinstance(result_dict[key], (int, float)):
                     return key, float(result_dict[key])
@@ -408,7 +403,7 @@ implementation:
             schema["co2_emissions_kg"] = compact_results["co2_emissions_kg"]
 
         # Save all outputs
-        log("\nSaving results...")
+        log("Saving results...")
         
         try:
             with open(OUT_COMPACT, "w") as f:
@@ -432,7 +427,7 @@ implementation:
             log(f"✗ Failed to save schema JSON: {e}")
 
         # Print summary
-        log("\n" + "=" * 70)
+        log("=" * 70)
         log("EVALUATION SUMMARY")
         log("=" * 70)
         
@@ -470,7 +465,7 @@ implementation:
         import sys
         print(metric_line, file=sys.stderr, flush=True)
 
-        log("\n✓ BenchmarksEvals v2 completed successfully")
+        log("✓ BenchmarksEvals v2 completed successfully")
 
     args:
       - --converted_model
