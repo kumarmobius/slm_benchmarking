@@ -264,7 +264,7 @@ implementation:
         log("=" * 70)
 
         for idx, task in enumerate(TASKS, start=1):
-            log(f"\n{'=' * 70}")
+            log(f"{'=' * 70}")
             log(f"Task {idx}/{total_tasks}: {task}")
             log(f"{'=' * 70}")
             
@@ -337,7 +337,7 @@ implementation:
                 }
 
         # Stop emissions tracking
-        log("\nStopping emissions tracker...")
+        log("Stopping emissions tracker...")
         emissions = tracker.stop()
         
         try:
