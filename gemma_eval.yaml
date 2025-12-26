@@ -1,7 +1,7 @@
 name: GemmaLMEval V6
 inputs:
   - name: gemma_model
-    type: Model
+    type: Data
     description: Cloud-pickled Gemma3LM object
   - name: tasks
     type: String
