@@ -19,7 +19,7 @@ outputs:
     description: Path to converted HuggingFace model (artifact directory)
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: kumar2004/gemma-lm-eval:v1
     command:
       - python3
       - -u
