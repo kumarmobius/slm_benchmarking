@@ -1,4 +1,4 @@
-name: GemmaLMEval V6
+name: GemmaLMEval V7
 inputs:
   - name: gemma_model
     type: Data
@@ -36,18 +36,18 @@ outputs:
   - name: emissions_csv
     type: Data
     description: CodeCarbon emissions CSV
-
 implementation:
   container:
     image: kumar2004/gemma-lm-eval:v1
     command:
-      - bash
-      - -lc
+      - sh
+      - -c
       - |
-        # Install missing dependencies
-        pip install --no-cache-dir immutabledict psutil 2>&1 | grep -v "Requirement already satisfied" || true
-        
-        cat > /tmp/gemma_eval.py <<'PYTHON_SCRIPT'
+        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' --user) && "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
         import argparse
         import os
         import sys
@@ -66,13 +66,6 @@ implementation:
         from lm_eval.tasks import TaskManager
         from codecarbon import EmissionsTracker
 
-        def log(msg):
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[EVAL {ts}] {msg}", flush=True)
-
-        # ============================================================
-        # Model Architecture (same as before)
-        # ============================================================
         def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
             assert head_dim % 2 == 0
             inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
@@ -242,9 +235,12 @@ implementation:
                     )
                 return logits, loss
 
-        # ============================================================
-        # Evaluation Logic
-        # ============================================================
+
+
+        
+        def log(msg):
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[EVAL {ts}] {msg}", flush=True)
         
         # Composite task groups for aggregate scoring
         COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval", "gpqa"]
@@ -253,7 +249,7 @@ implementation:
         PRELOAD_MAP = {
             "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
         }
-
+        
         def safe_json(obj):
             if isinstance(obj, dict):
                 return {k: safe_json(v) for k, v in obj.items()}
@@ -273,7 +269,7 @@ implementation:
                 return obj
             except Exception:
                 return str(obj)
-
+        
         def pick_metric(result_dict: Dict) -> Tuple[Optional[str], Optional[float]]:
             if not isinstance(result_dict, dict):
                 return None, None
@@ -301,7 +297,7 @@ implementation:
                     return key, float(value)
             
             return None, None
-
+        
         def detect_math_tasks(task_manager: Optional[TaskManager]) -> List[str]:
             if task_manager is None:
                 return ["hendrycks_math"]
@@ -323,7 +319,7 @@ implementation:
             except Exception as e:
                 log(f"Error detecting math tasks: {e}")
                 return ["hendrycks_math"]
-
+        
         def resolve_task_list(tasks_str: str, task_manager: Optional[TaskManager]) -> List[str]:
             tasks_str = tasks_str.strip()
             
@@ -333,7 +329,7 @@ implementation:
             
             # Normal case: comma-separated list
             return [t.strip() for t in tasks_str.split(",") if t.strip()]
-
+        
         def preload_datasets(task: str, hf_token: str) -> bool:
             task_key = task.lower()
             entries = PRELOAD_MAP.get(task_key, [])
@@ -356,7 +352,7 @@ implementation:
                     log(f"✗ Preload failed for {repo}::{split}: {e}")
             
             return success
-
+        
         def log_system_info():
             try:
                 mem = psutil.virtual_memory()
@@ -382,7 +378,7 @@ implementation:
                         log(f"  GPU {i}: <error reading properties: {e}>")
             else:
                 log("CUDA not available - using CPU")
-
+        
         def evaluate_single_task(
             model_obj,
             task: str,
@@ -391,7 +387,6 @@ implementation:
             batch_size: str,
             hf_token: str
         ) -> Dict[str, Any]:
-
             result = {
                 "success": False,
                 "metric_name": None,
@@ -452,7 +447,7 @@ implementation:
                 print(result["traceback"], flush=True)
             
             return result
-
+        
         def main():
             log("=" * 70)
             log("Gemma LM Evaluation Pipeline Starting")
@@ -681,12 +676,9 @@ implementation:
             log("=" * 70)
             log("Evaluation Pipeline Completed Successfully")
             log("=" * 70)
-
+        
         if __name__ == "__main__":
             main()
-        PYTHON_SCRIPT
-        
-        exec python3 -u /tmp/gemma_eval.py "$@"
     args:
       - --gemma_model
       - {inputPath: gemma_model}
