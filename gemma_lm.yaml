@@ -5,7 +5,7 @@ inputs:
   - { name: model_config, type: Data, description: "Model config file (json)" }
 
 outputs:
-  - { name: gemma_lm, type: Model, description: "Serialized Gemma3LM object" }
+  - { name: gemma_lm, type: Data, description: "Serialized Gemma3LM object" }
 
 implementation:
   container:
