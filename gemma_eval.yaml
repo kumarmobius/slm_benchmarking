@@ -1,11 +1,11 @@
-name: GemmaLMEval V3.5
+name: GemmaLMEval V4
 inputs:
   - name: gemma_model
     type: Model
     description: Cloud-pickled Gemma3LM object
   - name: tasks
     type: String
-    default: "wikitext"
+    default: "ifeval,math,musr,mmlu_pro,gpqa"
     description: Comma-separated lm_eval task names
   - name: num_fewshot
     type: Integer
@@ -15,10 +15,14 @@ inputs:
     type: Integer
     default: "1"
     description: Evaluation limit
+  - name: hf_token
+    type: String
+    default: "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"
+    description: Hugging Face authentication token
 outputs:
   - name: eval_results
-    type: Data
-    description: Evaluation results JSON
+    type: String
+    description: Evaluation results JSON with ifeval,math,musr,mmlu_pro,gpqa,co2 fields
 implementation:
   container:
     image: kumar2004/gemma-lm-eval:v1
@@ -32,12 +36,15 @@ implementation:
         import sys
         import json
         import pickle
-        import types
+        import traceback
+        from typing import Dict, Any, List
         import torch
-        from lm_eval import evaluator
         import torch.nn as nn
         import torch.nn.functional as F
-
+        from lm_eval import evaluator
+        from codecarbon import EmissionsTracker
+        
+        # Model definitions remain exactly the same as before
         def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
             assert head_dim % 2 == 0
             inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
@@ -207,6 +214,47 @@ implementation:
                     )
                 return logits, loss
 
+        def extract_score_from_task(task_result: Dict) -> float:
+            score = None
+            
+            # Try common score keys
+            common_keys = ["acc,none", "acc", "word_perplexity,none", "ppl,none", 
+                          "f1", "bleu", "rouge", "em", "exact_match"]
+            
+            for key in common_keys:
+                if key in task_result:
+                    value = task_result[key]
+                    if isinstance(value, (int, float)):
+                        score = float(value)
+                        break
+            
+            # If no common key found, try to find any numeric value
+            if score is None:
+                for key, value in task_result.items():
+                    if isinstance(value, (int, float)):
+                        score = float(value)
+                        break
+            
+            return score
+
+        def calculate_subtask_average(results: Dict, task_name: str) -> float:
+            subtask_scores = []
+            
+            # Look for subtasks in the results
+            for key, value in results.items():
+                # Check if this is a subtask (contains task_name with suffix)
+                if task_name in key and key != task_name:
+                    score = extract_score_from_task(value)
+                    if score is not None:
+                        subtask_scores.append(score)
+            
+            # If we found subtasks, calculate average
+            if subtask_scores:
+                avg_score = sum(subtask_scores) / len(subtask_scores)
+                return avg_score * 100  # Multiply by 100 as requested
+            
+            return None
+
         def main():
             parser = argparse.ArgumentParser(
                 description="Run lm_eval on a cloud-pickled Gemma3LM (with runtime torch patches)"
@@ -235,6 +283,11 @@ implementation:
                 required=True,
                 help="Evaluation limit"
             )
+            parser.add_argument(
+                "--hf_token",
+                required=True,
+                help="Hugging Face authentication token"
+            )
 
             # Outputs
             parser.add_argument(
@@ -247,42 +300,156 @@ implementation:
 
             print("[EVAL] Parsed arguments:")
             for k, v in vars(args).items():
-                print(f"  {k}: {v}")
+                if k == "hf_token":
+                    print(f"  {k}: {'*' * 8}{v[-4:]}" if v else f"  {k}: (empty)")
+                else:
+                    print(f"  {k}: {v}")
 
+            # Set HF token for authentication
+            if args.hf_token and args.hf_token.strip():
+                os.environ["HF_TOKEN"] = args.hf_token.strip()
+                print("[EVAL] HF token set in environment")
+            
+            # Verify model exists
             if not os.path.exists(args.gemma_model):
                 print(f"[FATAL] gemma_model not found: {args.gemma_model}", file=sys.stderr)
                 sys.exit(2)
 
             print("[EVAL] Loading Gemma3LM from pickle")
-            with open(args.gemma_model, "rb") as f:
-                gemma_lm = pickle.load(f)
+            try:
+                with open(args.gemma_model, "rb") as f:
+                    gemma_lm = pickle.load(f)
+                print("[EVAL] Loaded object type:", type(gemma_lm))
+            except Exception as e:
+                print(f"[FATAL] Failed to load model: {e}", file=sys.stderr)
+                sys.exit(2)
 
-            print("[EVAL] Loaded object type:", type(gemma_lm))
-
+            # Parse task list
             task_list = [t.strip() for t in args.tasks.split(",") if t.strip()]
             if not task_list:
                 print("[FATAL] No valid tasks provided", file=sys.stderr)
                 sys.exit(3)
-
-            print("[EVAL] Running lm_eval.simple_evaluate")
-            results = evaluator.simple_evaluate(
-                model=gemma_lm,
-                tasks=task_list,
-                num_fewshot=args.num_fewshot,
-                limit=args.limit
-            )
-
-            print("=" * 50)
-            print("RESULTS:")
-            print("=" * 50)
-            for key, value in results.get("results", {}).items():
+            
+            print(f"[EVAL] Tasks to evaluate: {task_list}")
+            
+            # Initialize result schema - all as strings initially
+            final_results = {
+                "ifeval": None,
+                "math": None,
+                "musr": None,
+                "mmlu_pro": None,
+                "gpqa": None,
+                "co2": None
+            }
+            
+            # Initialize CodeCarbon tracker
+            print("[EVAL] Starting CodeCarbon emissions tracking")
+            tracker = EmissionsTracker()
+            tracker.start()
+            
+            # Evaluate tasks sequentially with error handling
+            for task in task_list:
+                print(f"[EVAL] {'='*60}")
+                print(f"[EVAL] Evaluating task: {task}")
+                print(f"[EVAL] {'='*60}")
+                
+                try:
+                    # Run evaluation for single task
+                    results = evaluator.simple_evaluate(
+                        model=gemma_lm,
+                        tasks=[task],
+                        num_fewshot=args.num_fewshot,
+                        limit=args.limit
+                    )
+                    
+                    # Check if we have results
+                    if "results" not in results or not results["results"]:
+                        print(f"[EVAL] Warning: No results for task '{task}'")
+                        continue
+                    
+                    task_results = results["results"]
+                    
+                    # Handle BBH-like tasks with subtasks
+                    if task == "bbh" or any(f"{task}_" in key for key in task_results.keys()):
+                        # Calculate average of subtasks
+                        avg_score = calculate_subtask_average(task_results, task)
+                        
+                        if avg_score is not None:
+                            print(f"[EVAL] Task '{task}' has {len([k for k in task_results.keys() if task in k and k != task])} subtasks")
+                            print(f"[EVAL] Average score (×100): {avg_score:.2f}")
+                            
+                            # Map to final results if task is in our schema
+                            if task in final_results:
+                                final_results[task] = f"{avg_score:.6f}"
+                        else:
+                            print(f"[EVAL] Warning: Could not calculate average for task '{task}'")
+                    
+                    # Handle regular tasks
+                    elif task in task_results:
+                        # Extract score for the main task
+                        score = extract_score_from_task(task_results[task])
+                        
+                        if score is not None:
+                            # Multiply by 100 as requested
+                            final_score = score * 100
+                            print(f"[EVAL] Task '{task}' completed: {score} → {final_score:.2f} (×100)")
+                            
+                            # Map to final results if task is in our schema
+                            if task in final_results:
+                                final_results[task] = f"{final_score:.6f}"
+                        else:
+                            print(f"[EVAL] Warning: No numeric score found for task '{task}'")
+                            if task in final_results:
+                                final_results[task] = "N/A"
+                    
+                    else:
+                        print(f"[EVAL] Warning: Task '{task}' not found in results")
+                        
+                except Exception as e:
+                    print(f"[EVAL] ERROR in task '{task}': {e}")
+                    print(f"[EVAL] Traceback: {traceback.format_exc()}")
+                    print(f"[EVAL] Skipping task '{task}' and continuing...")
+                    
+                    # Mark as N/A if task is in our schema
+                    if task in final_results:
+                        final_results[task] = "N/A"
+                    
+                    continue
+            
+            # Stop tracker and get CO2 emissions
+            print("[EVAL] Stopping emissions tracking")
+            emissions = tracker.stop()
+            
+            # Format CO2 emissions as string
+            if emissions is not None:
+                final_results["co2"] = f"{emissions:.6f} kg"
+                print(f"[EVAL] Total CO2 emissions: {final_results['co2']}")
+            else:
+                final_results["co2"] = "0.000000 kg"
+                print("[EVAL] No emissions data recorded")
+            
+            # Clean up final results - remove None values, convert to strings
+            for key in list(final_results.keys()):
+                if final_results[key] is None:
+                    # Don't include tasks that weren't evaluated or didn't produce scores
+                    final_results.pop(key)
+                elif not isinstance(final_results[key], str):
+                    # Convert any remaining non-string values to strings
+                    final_results[key] = str(final_results[key])
+            
+            # Print final results
+            print("="*60)
+            print("FINAL RESULTS:")
+            print("="*60)
+            for key, value in final_results.items():
                 print(f"{key}: {value}")
-
+            
+            # Save to file
             os.makedirs(os.path.dirname(args.out_results), exist_ok=True)
             with open(args.out_results, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2)
-
-            print("[EVAL] Results written to:", args.out_results)
+                json.dump(final_results, f, indent=2)
+            
+            print(f"[EVAL] Results written to: {args.out_results}")
 
         if __name__ == "__main__":
             main()
@@ -295,5 +462,7 @@ implementation:
       - {inputValue: num_fewshot}
       - --limit
       - {inputValue: limit}
+      - --hf_token
+      - {inputValue: hf_token}
       - --out_results
       - {outputPath: eval_results}
