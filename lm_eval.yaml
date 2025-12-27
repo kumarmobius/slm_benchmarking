@@ -1,4 +1,4 @@
-name: BenchmarksEvals v2
+name: BenchmarksEvals v3
 inputs:
   - name: converted_model
     type: Model
@@ -45,7 +45,14 @@ implementation:
       - sh
       - -c
       - |
-        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' --user) && "$0" "$@"
+          (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+            'torch>=2.6.0' \
+            'immutabledict' \
+            'psutil' \
+          || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+            'torch>=2.6.0' \
+            'immutabledict' \
+            'psutil' --user)
       - python3
       - -u
       - -c
