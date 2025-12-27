@@ -1,4 +1,4 @@
-name: BenchmarksEvals v4
+name: BenchmarksEvals v5
 inputs:
   - name: converted_model
     type: Model
@@ -10,15 +10,15 @@ inputs:
   - name: tasks
     type: String
     default: "gpqa,mmlu_pro,bbh,math,ifeval"
-    description: "Comma-separated list of tasks to evaluate"
+    description: "Comma-separated list of tasks to evaluate. Use 'math' for hendrycks_math"
   - name: limit
     type: Integer
-    default: "1"
-    description: "Number of examples to evaluate per task (use null for all examples)"
+    default: "100"
+    description: "Number of examples to evaluate per task. Use -1 for all examples"
   - name: batch_size
     type: Integer
     default: "6"
-    description: "Batch size for evaluation"
+    description: "Batch size for evaluation. Use -1 for auto batch size"
   - name: num_fewshot
     type: Integer
     default: "0"
@@ -66,15 +66,15 @@ implementation:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
 
-        log("Starting BenchmarksEvals v2")
+        log("Starting BenchmarksEvals v4 - Production Mode")
 
         # Parse arguments
         parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
         parser.add_argument("--converted_model", required=True, help="Path to HF model directory")
         parser.add_argument("--hf_token", default="", help="HuggingFace authentication token")
         parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval", help="Comma-separated tasks")
-        parser.add_argument("--limit", type=int, default=100, help="Number of examples per task")
-        parser.add_argument("--batch_size", type=int, default=6, help="Batch size for evaluation")
+        parser.add_argument("--limit", type=int, default=100, help="Number of examples per task (-1 for all)")
+        parser.add_argument("--batch_size", type=int, default=6, help="Batch size for evaluation (-1 for auto)")
         parser.add_argument("--num_fewshot", type=int, default=0, help="Number of few-shot examples")
         parser.add_argument("--out_compact", required=True, help="Output path for compact metrics")
         parser.add_argument("--out_full", required=True, help="Output path for full results")
@@ -82,11 +82,27 @@ implementation:
         parser.add_argument("--out_schema", required=True, help="Output path for schema JSON")
         args = parser.parse_args()
 
+        # Handle limit: -1 means all examples
+        if args.limit == -1:
+            eval_limit = None
+            log("Limit set to -1: will evaluate ALL examples")
+        else:
+            eval_limit = args.limit
+            log(f"Limit set to {eval_limit} examples per task")
+
+        # Handle batch_size: -1 means auto
+        if args.batch_size == -1:
+            eval_batch_size = "auto"
+            log("Batch size set to -1: using AUTO batch size")
+        else:
+            eval_batch_size = str(args.batch_size)
+            log(f"Batch size set to {eval_batch_size}")
+
         log(f"Configuration:")
         log(f"  Model: {args.converted_model}")
         log(f"  Tasks: {args.tasks}")
-        log(f"  Limit: {args.limit}")
-        log(f"  Batch size: {args.batch_size}")
+        log(f"  Limit: {eval_limit if eval_limit is not None else 'ALL'}")
+        log(f"  Batch size: {eval_batch_size}")
         log(f"  Few-shot: {args.num_fewshot}")
 
         # Setup paths
@@ -122,27 +138,62 @@ implementation:
         })
         log("✓ Configured HuggingFace cache directories")
 
-        # Parse and validate tasks
+        # Parse and validate tasks - PRODUCTION LOGIC
         tm = None
+        task_name_map = {}  # Maps actual_task_name -> original_task_name for output
+        
         try:
             tm = TaskManager()
             avail = set(tm.task_index)
-            math_tasks = sorted([t for t in avail if "math" in t.lower() or "hendrycks_math" in t.lower()])
-            log(f"Available math tasks: {math_tasks}")
+            math_tasks = sorted([t for t in avail if "hendrycks_math" in t.lower()])
+            log(f"Available math tasks: {math_tasks[:5]}..." if len(math_tasks) > 5 else f"Available math tasks: {math_tasks}")
         except Exception as e:
-            log(f"⚠ Failed to build TaskManager for math autodetection: {e}")
+            log(f"⚠ Failed to build TaskManager for task detection: {e}")
             math_tasks = []
+            avail = set()
 
         req_tasks = args.tasks.strip()
+        
+        # Handle special case: entire string is "math" or "math_auto"
         if req_tasks.lower() in ("math", "math_auto"):
-            TASKS = [t for t in math_tasks if "hendrycks_math" in t.lower()] or ["hendrycks_math"]
-            log(f"Selected math tasks: {TASKS}")
+            if math_tasks:
+                selected_math = math_tasks[0]  # Use first available math task
+            else:
+                selected_math = "hendrycks_math"
+            TASKS = [selected_math]
+            task_name_map[selected_math] = "math"
+            log(f"Expanded standalone 'math' to: {selected_math}")
         else:
-            TASKS = [t.strip() for t in req_tasks.split(",") if t.strip()]
+            # Parse comma-separated tasks
+            parsed_tasks = [t.strip() for t in req_tasks.split(",") if t.strip()]
+            TASKS = []
+            
+            for original_task in parsed_tasks:
+                task_lower = original_task.lower()
+                
+                # Handle "math" in comma-separated list
+                if task_lower in ("math", "math_auto"):
+                    if math_tasks:
+                        actual_task = math_tasks[0]  # Use first available
+                    else:
+                        actual_task = "hendrycks_math"
+                    TASKS.append(actual_task)
+                    task_name_map[actual_task] = "math"
+                    log(f"Mapped '{original_task}' → '{actual_task}'")
+                else:
+                    # Use as-is
+                    TASKS.append(original_task)
+                    task_name_map[original_task] = original_task
+                    
+                    # Validate task exists
+                    if tm and original_task not in avail:
+                        log(f"⚠ WARNING: Task '{original_task}' not found in task registry")
+                        log(f"   Available tasks: {len(avail)} total")
 
         log(f"Will evaluate {len(TASKS)} task(s): {TASKS}")
+        log(f"Task name mapping: {task_name_map}")
 
-        # Composite group for averaging
+        # Composite group for averaging (use ORIGINAL names)
         COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
 
         # Preload datasets that need special handling
@@ -152,22 +203,22 @@ implementation:
 
         def preload_for_task(task):
             task_key = task.lower()
-            entries = PRELOAD_MAP.get(task_key)
-            if not entries:
-                return False
-            ok_any = False
-            for repo, split in entries:
-                try:
-                    log(f"Preloading dataset {repo} split={split}")
-                    try:
-                        load_dataset(repo, split, cache_dir="/tmp/hf_cache", token=TOKEN)
-                    except TypeError:
-                        load_dataset(repo, split, cache_dir="/tmp/hf_cache", use_auth_token=TOKEN)
-                    log(f"✓ Preloaded {repo}::{split}")
-                    ok_any = True
-                except Exception as e:
-                    log(f"⚠ Preload failed for {repo}::{split}: {e}")
-            return ok_any
+            for keyword, entries in PRELOAD_MAP.items():
+                if keyword in task_key:
+                    ok_any = False
+                    for repo, split in entries:
+                        try:
+                            log(f"Preloading dataset {repo} split={split}")
+                            try:
+                                load_dataset(repo, split, cache_dir="/tmp/hf_cache", token=TOKEN)
+                            except TypeError:
+                                load_dataset(repo, split, cache_dir="/tmp/hf_cache", use_auth_token=TOKEN)
+                            log(f"✓ Preloaded {repo}::{split}")
+                            ok_any = True
+                        except Exception as e:
+                            log(f"⚠ Preload failed for {repo}::{split}: {e}")
+                    return ok_any
+            return False
 
         # Log system resources
         try:
@@ -197,7 +248,8 @@ implementation:
             model = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
             log("✓ Model and tokenizer loaded successfully")
         except Exception as e:
-            log(f"✗ Failed to load model: {e}")
+            log(f"✗ FATAL: Failed to load model: {e}")
+            traceback.print_exc()
             raise
 
         # Detect device (GPU/CPU)
@@ -242,75 +294,85 @@ implementation:
                 return str(obj)
 
         def pick_metric(result_dict):
-            for key in ("acc_norm", "acc", "accuracy"):
+            # Priority order for metric selection
+            for key in ("acc_norm", "exact_match", "acc", "accuracy"):
                 if key in result_dict and isinstance(result_dict[key], (int, float)):
                     return key, float(result_dict[key])
+            # Fallback: find any numeric value
             for key, value in result_dict.items():
-                if isinstance(value, (int, float)):
+                if isinstance(value, (int, float)) and key not in ("alias", "samples"):
                     return key, float(value)
             return None, None
 
         # Run evaluations
         compact_results = {}
         full_results = {}
+        schema_results = {}  # For schema_json output with original names
         total_tasks = len(TASKS)
 
         log("=" * 70)
         log(f"Starting evaluation of {total_tasks} task(s)")
         log("=" * 70)
 
-        for idx, task in enumerate(TASKS, start=1):
+        for idx, actual_task in enumerate(TASKS, start=1):
+            original_task = task_name_map.get(actual_task, actual_task)
+            
             log(f"{'=' * 70}")
-            log(f"Task {idx}/{total_tasks}: {task}")
+            log(f"Task {idx}/{total_tasks}: {original_task}")
+            if actual_task != original_task:
+                log(f"  (evaluating as: {actual_task})")
             log(f"{'=' * 70}")
             
             # Preload datasets if needed
-            preload_for_task(task)
+            preload_for_task(actual_task)
             
             start_time = time.time()
             try:
                 model_args_str = f"pretrained={CONVERTED},tokenizer={CONVERTED},trust_remote_code=False"
                 
                 log(f"Running evaluation with:")
-                log(f"  - Batch size: {args.batch_size}")
+                log(f"  - Batch size: {eval_batch_size}")
                 log(f"  - Few-shot: {args.num_fewshot}")
-                log(f"  - Limit: {args.limit}")
+                log(f"  - Limit: {eval_limit if eval_limit is not None else 'ALL'}")
                 
                 result = evaluator.simple_evaluate(
                     model="hf",
                     model_args=model_args_str,
-                    tasks=[task],
-                    batch_size=str(args.batch_size),
+                    tasks=[actual_task],
+                    batch_size=eval_batch_size,
                     device=eval_device,
                     num_fewshot=args.num_fewshot,
-                    limit=args.limit,
+                    limit=eval_limit,
                 )
                 
                 duration = time.time() - start_time
-                full_results[task] = safe_json(result)
+                full_results[original_task] = safe_json(result)
                 
                 # Extract metrics
                 results_dict = result.get("results", {})
-                task_result = results_dict.get(task) or (
+                task_result = results_dict.get(actual_task) or (
                     next(iter(results_dict.values())) if results_dict else None
                 )
 
                 if isinstance(task_result, dict):
                     metric_name, metric_value = pick_metric(task_result)
                     if metric_name is not None:
-                        compact_results[task] = {
+                        # Store in compact with original name
+                        compact_results[original_task] = {
                             metric_name: metric_value,
                             "time_s": round(duration, 3)
                         }
+                        # Store in schema with original name and percentage
+                        schema_results[original_task] = round(metric_value * 100.0, 2)
                         log(f"✓ Task completed: {metric_name} = {metric_value:.4f} ({duration:.1f}s)")
                     else:
-                        compact_results[task] = {
+                        compact_results[original_task] = {
                             "note": "no numeric metric found",
                             "time_s": round(duration, 3)
                         }
                         log(f"⚠ Task completed but no numeric metric found ({duration:.1f}s)")
                 else:
-                    compact_results[task] = {
+                    compact_results[original_task] = {
                         "note": "unexpected result structure",
                         "raw": safe_json(task_result),
                         "time_s": round(duration, 3)
@@ -322,11 +384,11 @@ implementation:
                 tb = traceback.format_exc()
                 log(f"✗ Task failed with exception: {e}")
                 print(tb, flush=True)
-                compact_results[task] = {
+                compact_results[original_task] = {
                     "error": str(e),
                     "time_s": round(duration, 3)
                 }
-                full_results[task] = {
+                full_results[original_task] = {
                     "error": str(e),
                     "traceback": tb,
                     "time_s": round(duration, 3)
@@ -334,22 +396,26 @@ implementation:
 
         # Stop emissions tracking
         log("Stopping emissions tracker...")
-        emissions = tracker.stop()
-        
         try:
-            emissions_val = float(emissions)
-            co2_str = f"{emissions_val:.4f} kg"
-        except Exception:
+            emissions = tracker.stop()
+            try:
+                emissions_val = float(emissions)
+                co2_str = f"{emissions_val:.4f}"
+            except Exception:
+                co2_str = "N/A"
+        except Exception as e:
+            log(f"⚠ Failed to stop emissions tracker: {e}")
             co2_str = "N/A"
         
         compact_results["co2_emissions_kg"] = co2_str
         full_results["co2_emissions_kg"] = co2_str
-        log(f"✓ CO2 emissions: {co2_str}")
+        schema_results["co2_emissions_kg"] = co2_str
+        log(f"✓ CO2 emissions: {co2_str} kg")
 
-        # Compute composite mean over defined group
+        # Compute composite mean over defined group (use ORIGINAL names)
         found_vals = []
-        for task in COMPOSITE_GROUP:
-            entry = compact_results.get(task)
+        for original_task in COMPOSITE_GROUP:
+            entry = compact_results.get(original_task)
             if isinstance(entry, dict):
                 for key, value in entry.items():
                     if key in ("time_s", "error") or key.startswith("note"):
@@ -361,12 +427,15 @@ implementation:
         if found_vals:
             composite_score = float(np.mean(found_vals))
             compact_results["composite_mean"] = round(composite_score, 6)
+            schema_results["composite_mean"] = round(composite_score * 100.0, 2)
             log(f"✓ Composite mean ({COMPOSITE_GROUP}): {composite_score:.4f}")
+        else:
+            log(f"⚠ No valid scores found for composite mean calculation")
 
-        # Compute math tasks mean
+        # Compute math tasks mean for compact_results only (NOT for schema_json)
         math_scores = []
-        for task_name, entry in compact_results.items():
-            if "math" in task_name.lower():
+        for original_task, entry in compact_results.items():
+            if "math" in original_task.lower():
                 if isinstance(entry, dict):
                     for key, value in entry.items():
                         if key in ("time_s", "error") or key.startswith("note"):
@@ -378,49 +447,49 @@ implementation:
         if math_scores:
             math_mean = float(np.mean(math_scores))
             compact_results["math_mean"] = round(math_mean, 6)
-            log(f"✓ Math tasks mean: {math_mean:.4f}")
+            # NOTE: NOT adding math_mean to schema_results - only individual task scores
+            log(f"✓ Math tasks mean: {math_mean:.4f} (in compact_results only)")
 
-        # Build schema JSON (percentage format)
-        schema = {}
-        for task, entry in compact_results.items():
-            if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
-                continue
-            if isinstance(entry, dict):
-                for key, value in entry.items():
-                    if isinstance(value, (int, float)) and key != "time_s":
-                        try:
-                            # Convert to percentage
-                            schema[task] = round(float(value) * 100.0, 2)
-                        except Exception:
-                            pass
-                        break
-        
-        if compact_results.get("co2_emissions_kg"):
-            schema["co2_emissions_kg"] = compact_results["co2_emissions_kg"]
-
-        # Save all outputs
+        # Save all outputs with error handling
         log("Saving results...")
+        
+        save_errors = []
         
         try:
             with open(OUT_COMPACT, "w") as f:
                 json.dump(safe_json(compact_results), f, indent=2)
             log(f"✓ Compact metrics: {OUT_COMPACT}")
         except Exception as e:
-            log(f"✗ Failed to save compact metrics: {e}")
+            err_msg = f"Failed to save compact metrics: {e}"
+            log(f"✗ {err_msg}")
+            save_errors.append(err_msg)
 
         try:
             with open(OUT_FULL, "w") as f:
                 json.dump(safe_json(full_results), f, indent=2)
             log(f"✓ Full results: {OUT_FULL}")
         except Exception as e:
-            log(f"✗ Failed to save full results: {e}")
+            err_msg = f"Failed to save full results: {e}"
+            log(f"✗ {err_msg}")
+            save_errors.append(err_msg)
 
         try:
             with open(OUT_SCHEMA, "w") as f:
-                json.dump(schema, f, indent=2)
+                json.dump(schema_results, f, indent=2)
             log(f"✓ Schema JSON: {OUT_SCHEMA}")
         except Exception as e:
-            log(f"✗ Failed to save schema JSON: {e}")
+            err_msg = f"Failed to save schema JSON: {e}"
+            log(f"✗ {err_msg}")
+            save_errors.append(err_msg)
+
+        # Verify emissions CSV exists
+        try:
+            if os.path.exists(OUT_EMISSIONS):
+                log(f"✓ Emissions CSV: {OUT_EMISSIONS}")
+            else:
+                log(f"⚠ Emissions CSV not found at: {OUT_EMISSIONS}")
+        except Exception as e:
+            log(f"⚠ Failed to check emissions CSV: {e}")
 
         # Print summary
         log("=" * 70)
@@ -428,6 +497,8 @@ implementation:
         log("=" * 70)
         
         for task, data in compact_results.items():
+            if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
+                continue
             if isinstance(data, dict):
                 metric_name = None
                 metric_value = None
@@ -440,28 +511,44 @@ implementation:
                         break
                 if metric_name is not None:
                     log(f"{task}: {metric_name} = {metric_value:.4f}")
+                elif "error" in data:
+                    log(f"{task}: ERROR - {data['error']}")
                 else:
                     log(f"{task}: {data}")
             else:
                 log(f"{task}: {data}")
+
+        if compact_results.get("composite_mean"):
+            log(f"Composite Mean: {compact_results['composite_mean']:.4f}")
+        if compact_results.get("math_mean"):
+            log(f"Math Mean: {compact_results['math_mean']:.4f}")
+        log(f"CO2 Emissions: {co2_str} kg")
 
         # Print machine-readable JSON for parsing
         try:
             metric_payload = {
                 "compact": safe_json(compact_results),
                 "full": safe_json(full_results),
+                "schema": schema_results,
                 "co2_kg": co2_str,
-                "schema": schema
+                "save_errors": save_errors if save_errors else None
             }
-        except Exception:
-            metric_payload = compact_results
+        except Exception as e:
+            log(f"⚠ Failed to build metric payload: {e}")
+            metric_payload = {"compact": safe_json(compact_results)}
 
         metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False)
         print(metric_line, flush=True)
         import sys
         print(metric_line, file=sys.stderr, flush=True)
 
-        log("✓ BenchmarksEvals v2 completed successfully")
+        # Final status
+        if save_errors:
+            log(f"⚠ Completed with {len(save_errors)} save error(s)")
+            for err in save_errors:
+                log(f"  - {err}")
+        else:
+            log("✓ BenchmarksEvals v4 completed successfully - Production Ready")
 
     args:
       - --converted_model
