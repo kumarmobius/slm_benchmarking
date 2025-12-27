@@ -1,4 +1,4 @@
-name: GemmaLMEval V7
+name: GemmaLMEval V8
 inputs:
   - name: gemma_model
     type: Data
@@ -6,7 +6,7 @@ inputs:
   - name: tasks
     type: String
     default: "gpqa,mmlu_pro,bbh,math,ifeval"
-    description: Comma-separated lm_eval task names (use 'math' for auto-detection)
+    description: "Comma-separated lm_eval task names. Use 'math' for hendrycks_math"
   - name: num_fewshot
     type: Integer
     default: "0"
@@ -14,14 +14,14 @@ inputs:
   - name: limit
     type: Integer
     default: "100"
-    description: Evaluation limit per task
+    description: "Evaluation limit per task. Use -1 for all examples"
   - name: batch_size
-    type: String
-    default: "auto"
-    description: Batch size for evaluation
+    type: Integer
+    default: "6"
+    description: "Batch size for evaluation. Use -1 for auto batch size"
   - name: hf_token
     type: String
-    default: "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"
+    default: ""
     description: Hugging Face authentication token
 outputs:
   - name: compact_metrics
@@ -235,14 +235,14 @@ implementation:
                     )
                 return logits, loss
 
-
-
         
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
         
-        # Composite task groups for aggregate scoring
+        log("Starting GemmaLMEval V7 - Production Mode")
+        
+        # Composite task groups for aggregate scoring (use ORIGINAL names)
         COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval", "gpqa"]
         
         # Dataset preloading map (for datasets that need special handling)
@@ -306,65 +306,95 @@ implementation:
                 available = set(task_manager.task_index)
                 math_tasks = sorted([
                     t for t in available 
-                    if "math" in t.lower() or "hendrycks" in t.lower()
+                    if "hendrycks_math" in t.lower()
                 ])
-                log(f"Detected {len(math_tasks)} math tasks: {math_tasks[:5]}{'...' if len(math_tasks) > 5 else ''}")
                 
-                # Prefer hendrycks_math variants
-                hendrycks = [t for t in math_tasks if "hendrycks_math" in t.lower()]
-                if hendrycks:
-                    return hendrycks
+                if math_tasks:
+                    log(f"Detected {len(math_tasks)} hendrycks_math tasks: {math_tasks[:3]}{'...' if len(math_tasks) > 3 else ''}")
+                    return [math_tasks[0]]  # Use first hendrycks_math task
                 
-                return math_tasks[:1] if math_tasks else ["hendrycks_math"]
+                log("No hendrycks_math tasks found, using fallback")
+                return ["hendrycks_math"]
             except Exception as e:
                 log(f"Error detecting math tasks: {e}")
                 return ["hendrycks_math"]
         
-        def resolve_task_list(tasks_str: str, task_manager: Optional[TaskManager]) -> List[str]:
+        def resolve_task_list(tasks_str: str, task_manager: Optional[TaskManager]) -> Tuple[List[str], Dict[str, str]]:
             tasks_str = tasks_str.strip()
+            task_name_map = {}
             
-            # Special case: math auto-detection
+            # Special case: entire string is "math" or "math_auto"
             if tasks_str.lower() in ("math", "math_auto"):
-                return detect_math_tasks(task_manager)
+                math_tasks = detect_math_tasks(task_manager)
+                actual_task = math_tasks[0]
+                task_name_map[actual_task] = "math"
+                log(f"Expanded standalone 'math' to: {actual_task}")
+                return [actual_task], task_name_map
             
-            # Normal case: comma-separated list
-            return [t.strip() for t in tasks_str.split(",") if t.strip()]
+            # Parse comma-separated tasks
+            parsed_tasks = [t.strip() for t in tasks_str.split(",") if t.strip()]
+            actual_tasks = []
+            
+            for original_task in parsed_tasks:
+                task_lower = original_task.lower()
+                
+                # Handle "math" in comma-separated list
+                if task_lower in ("math", "math_auto"):
+                    math_tasks = detect_math_tasks(task_manager)
+                    actual_task = math_tasks[0]
+                    actual_tasks.append(actual_task)
+                    task_name_map[actual_task] = "math"
+                    log(f"Mapped '{original_task}' → '{actual_task}'")
+                else:
+                    # Use as-is
+                    actual_tasks.append(original_task)
+                    task_name_map[original_task] = original_task
+                    
+                    # Validate task exists (warning only)
+                    if task_manager:
+                        try:
+                            available = set(task_manager.task_index)
+                            if original_task not in available:
+                                log(f"⚠ WARNING: Task '{original_task}' not found in task registry")
+                        except Exception:
+                            pass
+            
+            return actual_tasks, task_name_map
         
         def preload_datasets(task: str, hf_token: str) -> bool:
             task_key = task.lower()
-            entries = PRELOAD_MAP.get(task_key, [])
             
-            if not entries:
-                return False
+            for keyword, entries in PRELOAD_MAP.items():
+                if keyword in task_key:
+                    success = False
+                    for repo, split in entries:
+                        try:
+                            log(f"Preloading dataset {repo}::{split}")
+                            from datasets import load_dataset
+                            try:
+                                load_dataset(repo, split, cache_dir="/tmp/hf_cache", token=hf_token)
+                            except TypeError:
+                                load_dataset(repo, split, cache_dir="/tmp/hf_cache", use_auth_token=hf_token)
+                            log(f"✓ Preloaded {repo}::{split}")
+                            success = True
+                        except Exception as e:
+                            log(f"⚠ Preload failed for {repo}::{split}: {e}")
+                    return success
             
-            success = False
-            for repo, split in entries:
-                try:
-                    log(f"Preloading dataset {repo}::{split}")
-                    from datasets import load_dataset
-                    try:
-                        load_dataset(repo, split, cache_dir="/tmp/hf_cache", token=hf_token)
-                    except TypeError:
-                        load_dataset(repo, split, cache_dir="/tmp/hf_cache", use_auth_token=hf_token)
-                    log(f"✓ Preloaded {repo}::{split}")
-                    success = True
-                except Exception as e:
-                    log(f"✗ Preload failed for {repo}::{split}: {e}")
-            
-            return success
+            return False
         
         def log_system_info():
             try:
                 mem = psutil.virtual_memory()
                 log(f"System RAM: {mem.total / 1e9:.2f} GB total, {mem.available / 1e9:.2f} GB available")
             except Exception as e:
-                log(f"Could not read RAM info: {e}")
+                log(f"⚠ Could not read RAM info: {e}")
             
             try:
                 total, used, free = shutil.disk_usage("/")
                 log(f"Disk space: {total / 1e9:.2f} GB total, {free / 1e9:.2f} GB free")
             except Exception as e:
-                log(f"Could not read disk info: {e}")
+                log(f"⚠ Could not read disk info: {e}")
             
             if torch.cuda.is_available():
                 gpu_count = torch.cuda.device_count()
@@ -377,13 +407,14 @@ implementation:
                     except Exception as e:
                         log(f"  GPU {i}: <error reading properties: {e}>")
             else:
-                log("CUDA not available - using CPU")
+                log("⚠ CUDA not available - using CPU")
         
         def evaluate_single_task(
             model_obj,
-            task: str,
+            actual_task: str,
+            original_task: str,
             num_fewshot: int,
-            limit: int,
+            limit: Optional[int],
             batch_size: str,
             hf_token: str
         ) -> Dict[str, Any]:
@@ -401,13 +432,18 @@ implementation:
             
             try:
                 # Preload datasets if needed
-                preload_datasets(task, hf_token)
+                preload_datasets(actual_task, hf_token)
                 
                 # Run evaluation
-                log(f"Running evaluation for task: {task}")
+                log(f"Running evaluation:")
+                log(f"  - Task: {actual_task}")
+                log(f"  - Few-shot: {num_fewshot}")
+                log(f"  - Limit: {limit if limit is not None else 'ALL'}")
+                log(f"  - Batch size: {batch_size}")
+                
                 res = evaluator.simple_evaluate(
                     model=model_obj,
-                    tasks=[task],
+                    tasks=[actual_task],
                     num_fewshot=num_fewshot,
                     limit=limit,
                     batch_size=batch_size,
@@ -420,7 +456,7 @@ implementation:
                 results_dict = res.get("results", {})
                 
                 # Try to find task results
-                task_result = results_dict.get(task)
+                task_result = results_dict.get(actual_task)
                 if task_result is None and results_dict:
                     # Fallback: use first result
                     task_result = next(iter(results_dict.values()))
@@ -431,26 +467,26 @@ implementation:
                         result["success"] = True
                         result["metric_name"] = metric_name
                         result["metric_value"] = metric_value
-                        log(f"✓ Task '{task}' completed: {metric_name} = {metric_value:.6f} ({result['time_s']:.1f}s)")
+                        log(f"✓ Task '{original_task}' completed: {metric_name} = {metric_value:.6f} ({result['time_s']:.1f}s)")
                     else:
                         result["error"] = "No numeric metric found in results"
-                        log(f"✗ Task '{task}': No numeric metric found")
+                        log(f"⚠ Task '{original_task}': No numeric metric found")
                 else:
                     result["error"] = f"Unexpected result structure: {type(task_result)}"
-                    log(f"✗ Task '{task}': Unexpected result structure")
+                    log(f"⚠ Task '{original_task}': Unexpected result structure")
                 
             except Exception as e:
                 result["time_s"] = time.time() - start_time
                 result["error"] = str(e)
                 result["traceback"] = traceback.format_exc()
-                log(f"✗ Task '{task}' failed: {e}")
+                log(f"✗ Task '{original_task}' failed: {e}")
                 print(result["traceback"], flush=True)
             
             return result
         
         def main():
             log("=" * 70)
-            log("Gemma LM Evaluation Pipeline Starting")
+            log("Gemma LM Evaluation Pipeline - Production Mode")
             log("=" * 70)
             
             # Parse arguments
@@ -467,19 +503,43 @@ implementation:
             parser.add_argument("--out_emissions", required=True)
             args = parser.parse_args()
             
+            # Handle limit: -1 means all examples
+            if args.limit == -1:
+                eval_limit = None
+                log("Limit set to -1: will evaluate ALL examples")
+            else:
+                eval_limit = args.limit
+                log(f"Limit set to {eval_limit} examples per task")
+            
+            # Handle batch_size: -1 means auto, convert int to str
+            if isinstance(args.batch_size, int):
+                if args.batch_size == -1:
+                    eval_batch_size = "auto"
+                    log("Batch size set to -1: using AUTO batch size")
+                else:
+                    eval_batch_size = str(args.batch_size)
+                    log(f"Batch size set to {eval_batch_size}")
+            else:
+                eval_batch_size = str(args.batch_size)
+                if eval_batch_size == "-1":
+                    eval_batch_size = "auto"
+                    log("Batch size set to -1: using AUTO batch size")
+                else:
+                    log(f"Batch size set to {eval_batch_size}")
+            
             log(f"Configuration:")
             log(f"  Model: {args.gemma_model}")
             log(f"  Tasks: {args.tasks}")
             log(f"  Few-shot: {args.num_fewshot}")
-            log(f"  Limit: {args.limit}")
-            log(f"  Batch size: {args.batch_size}")
+            log(f"  Limit: {eval_limit if eval_limit is not None else 'ALL'}")
+            log(f"  Batch size: {eval_batch_size}")
             log(f"  HF Token: {'***' + args.hf_token[-4:] if args.hf_token else 'None'}")
             
             # Setup HF authentication
             if args.hf_token:
                 os.environ["HF_TOKEN"] = args.hf_token
                 os.environ["HUGGINGFACE_HUB_TOKEN"] = args.hf_token
-                log("HuggingFace authentication configured")
+                log("✓ HuggingFace authentication configured")
             
             # Setup cache directories
             os.environ.update({
@@ -488,10 +548,13 @@ implementation:
                 "HUGGINGFACE_HUB_CACHE": "/tmp/hf_cache",
                 "HF_HUB_DISABLE_TELEMETRY": "1"
             })
+            log("✓ Cache directories configured")
             
             # Create output directories
             for path in [args.out_compact, args.out_full, args.out_schema, args.out_emissions]:
-                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                parent_dir = os.path.dirname(path)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
             
             # Log system info
             log_system_info()
@@ -499,7 +562,7 @@ implementation:
             # Load model
             log(f"Loading model from: {args.gemma_model}")
             if not os.path.exists(args.gemma_model):
-                log(f"FATAL: Model file not found: {args.gemma_model}")
+                log(f"✗ FATAL: Model file not found: {args.gemma_model}")
                 sys.exit(2)
             
             try:
@@ -507,7 +570,7 @@ implementation:
                     gemma_lm = pickle.load(f)
                 log(f"✓ Model loaded: {type(gemma_lm)}")
             except Exception as e:
-                log(f"FATAL: Failed to load model: {e}")
+                log(f"✗ FATAL: Failed to load model: {e}")
                 traceback.print_exc()
                 sys.exit(2)
             
@@ -517,12 +580,13 @@ implementation:
                 task_manager = TaskManager()
                 log(f"✓ TaskManager initialized with {len(task_manager.task_index)} tasks")
             except Exception as e:
-                log(f"Warning: TaskManager initialization failed: {e}")
+                log(f"⚠ Warning: TaskManager initialization failed: {e}")
                 task_manager = None
             
-            # Resolve task list
-            task_list = resolve_task_list(args.tasks, task_manager)
-            log(f"Tasks to evaluate ({len(task_list)}): {task_list}")
+            # Resolve task list with name mapping
+            actual_tasks, task_name_map = resolve_task_list(args.tasks, task_manager)
+            log(f"Tasks to evaluate ({len(actual_tasks)}): {actual_tasks}")
+            log(f"Task name mapping: {task_name_map}")
             
             # Start emissions tracking
             log(f"Starting emissions tracking -> {args.out_emissions}")
@@ -535,55 +599,67 @@ implementation:
             # Evaluate all tasks
             compact_results = {}
             full_results = {}
+            schema_results = {}  # For schema_json with original names
             
             log("=" * 70)
             log("Starting Task Evaluation")
             log("=" * 70)
             
-            for idx, task in enumerate(task_list, 1):
+            for idx, actual_task in enumerate(actual_tasks, 1):
+                original_task = task_name_map.get(actual_task, actual_task)
+                
                 log(f"{'='*70}")
-                log(f"Task {idx}/{len(task_list)}: {task}")
+                log(f"Task {idx}/{len(actual_tasks)}: {original_task}")
+                if actual_task != original_task:
+                    log(f"  (evaluating as: {actual_task})")
                 log(f"{'='*70}")
                 
                 task_result = evaluate_single_task(
-                    gemma_lm, task, args.num_fewshot, args.limit, 
-                    args.batch_size, args.hf_token
+                    gemma_lm, actual_task, original_task,
+                    args.num_fewshot, eval_limit, 
+                    eval_batch_size, args.hf_token
                 )
                 
-                # Store in full results
-                full_results[task] = task_result
+                # Store in full results with ORIGINAL name
+                full_results[original_task] = task_result
                 
-                # Store in compact results
+                # Store in compact results with ORIGINAL name
                 if task_result["success"]:
-                    compact_results[task] = {
+                    compact_results[original_task] = {
                         task_result["metric_name"]: task_result["metric_value"],
                         "time_s": round(task_result["time_s"], 3)
                     }
+                    # Store in schema with ORIGINAL name and percentage
+                    schema_results[original_task] = round(task_result["metric_value"] * 100.0, 2)
                 else:
-                    compact_results[task] = {
+                    compact_results[original_task] = {
                         "error": task_result["error"],
                         "time_s": round(task_result["time_s"], 3)
                     }
             
             # Stop emissions tracking
             log("Stopping emissions tracking...")
-            emissions = tracker.stop()
-            
             try:
-                emissions_val = float(emissions) if emissions is not None else 0.0
-                co2_str = f"{emissions_val:.6f} kg"
-            except Exception:
-                co2_str = "0.000000 kg"
+                emissions = tracker.stop()
+                try:
+                    emissions_val = float(emissions) if emissions is not None else 0.0
+                    co2_str = f"{emissions_val:.6f}"
+                except Exception:
+                    co2_str = "0.000000"
+            except Exception as e:
+                log(f"⚠ Failed to stop emissions tracker: {e}")
+                co2_str = "0.000000"
             
             compact_results["co2_emissions_kg"] = co2_str
             full_results["co2_emissions_kg"] = co2_str
-            log(f"CO2 emissions: {co2_str}")
+            schema_results["co2_emissions_kg"] = co2_str
+            log(f"✓ CO2 emissions: {co2_str} kg")
             
-            # Calculate composite mean
+            # Calculate composite mean (use ORIGINAL names)
             composite_values = []
-            for task in COMPOSITE_GROUP:
-                if task in compact_results and isinstance(compact_results[task], dict):
-                    for k, v in compact_results[task].items():
+            for original_task in COMPOSITE_GROUP:
+                if original_task in compact_results and isinstance(compact_results[original_task], dict):
+                    for k, v in compact_results[original_task].items():
                         if k not in ("time_s", "error") and isinstance(v, (int, float)):
                             composite_values.append(float(v))
                             break
@@ -591,12 +667,15 @@ implementation:
             if composite_values:
                 composite_mean = float(np.mean(composite_values))
                 compact_results["composite_mean"] = round(composite_mean, 6)
-                log(f"Composite mean ({len(composite_values)} tasks): {composite_mean:.6f}")
+                schema_results["composite_mean"] = round(composite_mean * 100.0, 2)
+                log(f"✓ Composite mean ({len(composite_values)} tasks): {composite_mean:.6f}")
+            else:
+                log(f"⚠ No valid scores found for composite mean calculation")
             
-            # Calculate math mean
+            # Calculate math mean for compact_results only (NOT for schema_json)
             math_values = []
-            for task_name, entry in compact_results.items():
-                if "math" in task_name.lower() and isinstance(entry, dict):
+            for original_task, entry in compact_results.items():
+                if "math" in original_task.lower() and isinstance(entry, dict):
                     for k, v in entry.items():
                         if k not in ("time_s", "error") and isinstance(v, (int, float)):
                             math_values.append(float(v))
@@ -605,53 +684,60 @@ implementation:
             if math_values:
                 math_mean = float(np.mean(math_values))
                 compact_results["math_mean"] = round(math_mean, 6)
-                log(f"Math mean ({len(math_values)} tasks): {math_mean:.6f}")
-            
-            # Build schema (percentage scores)
-            schema = {}
-            for task, entry in compact_results.items():
-                if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
-                    continue
-                if isinstance(entry, dict):
-                    for k, v in entry.items():
-                        if isinstance(v, (int, float)) and k not in ("time_s", "error"):
-                            # Convert to percentage (multiply by 100)
-                            schema[task] = round(float(v) * 100.0, 2)
-                            break
-            
-            schema["co2_emissions_kg"] = co2_str
+                # NOTE: NOT adding math_mean to schema_results
+                log(f"✓ Math mean ({len(math_values)} tasks): {math_mean:.6f} (in compact_results only)")
             
             # Save all outputs
             log("=" * 70)
             log("Saving Results")
             log("=" * 70)
             
+            save_errors = []
+            
             try:
                 with open(args.out_compact, "w") as f:
                     json.dump(safe_json(compact_results), f, indent=2)
                 log(f"✓ Compact results: {args.out_compact}")
             except Exception as e:
-                log(f"✗ Failed to save compact results: {e}")
+                err_msg = f"Failed to save compact results: {e}"
+                log(f"✗ {err_msg}")
+                save_errors.append(err_msg)
             
             try:
                 with open(args.out_full, "w") as f:
                     json.dump(safe_json(full_results), f, indent=2)
                 log(f"✓ Full results: {args.out_full}")
             except Exception as e:
-                log(f"✗ Failed to save full results: {e}")
+                err_msg = f"Failed to save full results: {e}"
+                log(f"✗ {err_msg}")
+                save_errors.append(err_msg)
             
             try:
                 with open(args.out_schema, "w") as f:
-                    json.dump(schema, f, indent=2)
+                    json.dump(schema_results, f, indent=2)
                 log(f"✓ Schema JSON: {args.out_schema}")
             except Exception as e:
-                log(f"✗ Failed to save schema: {e}")
+                err_msg = f"Failed to save schema: {e}"
+                log(f"✗ {err_msg}")
+                save_errors.append(err_msg)
+            
+            # Verify emissions CSV exists
+            try:
+                if os.path.exists(args.out_emissions):
+                    log(f"✓ Emissions CSV: {args.out_emissions}")
+                else:
+                    log(f"⚠ Emissions CSV not found at: {args.out_emissions}")
+            except Exception as e:
+                log(f"⚠ Failed to check emissions CSV: {e}")
             
             # Print summary
             log("=" * 70)
             log("EVALUATION SUMMARY")
             log("=" * 70)
+            
             for task, data in compact_results.items():
+                if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
+                    continue
                 if isinstance(data, dict):
                     for k, v in data.items():
                         if k not in ("time_s", "error"):
@@ -662,20 +748,33 @@ implementation:
                                 log(f"  {task}: {k} = {v}")
                                 break
             
+            if compact_results.get("composite_mean"):
+                log(f"Composite Mean: {compact_results['composite_mean']:.6f}")
+            if compact_results.get("math_mean"):
+                log(f"Math Mean: {compact_results['math_mean']:.6f}")
+            log(f"CO2 Emissions: {co2_str} kg")
+            
             # Print machine-readable JSON
             metric_payload = {
                 "compact": safe_json(compact_results),
                 "full": safe_json(full_results),
+                "schema": schema_results,
                 "co2_kg": co2_str,
-                "schema": schema
+                "save_errors": save_errors if save_errors else None
             }
             metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"))
             print(metric_line, flush=True)
             print(metric_line, file=sys.stderr, flush=True)
             
-            log("=" * 70)
-            log("Evaluation Pipeline Completed Successfully")
-            log("=" * 70)
+            # Final status
+            if save_errors:
+                log(f"⚠ Completed with {len(save_errors)} save error(s)")
+                for err in save_errors:
+                    log(f"  - {err}")
+            else:
+                log("=" * 70)
+                log("✓ Evaluation Pipeline Completed Successfully - Production Ready")
+                log("=" * 70)
         
         if __name__ == "__main__":
             main()
