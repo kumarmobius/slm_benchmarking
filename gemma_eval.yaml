@@ -1,4 +1,4 @@
-name: GemmaLMEval V8
+name: GemmaLMEval V9
 inputs:
   - name: gemma_model
     type: Data
@@ -752,7 +752,7 @@ implementation:
                 log(f"Composite Mean: {compact_results['composite_mean']:.6f}")
             if compact_results.get("math_mean"):
                 log(f"Math Mean: {compact_results['math_mean']:.6f}")
-            log(f"CO2 Emissions: {co2_str} kg")
+            log(f"CO2 Emissions: {co2_val} kg")
             
             # Print machine-readable JSON
             metric_payload = {
