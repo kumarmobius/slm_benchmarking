@@ -1,4 +1,4 @@
-name: BenchmarksEvals v5
+name: BenchmarksEvals v6
 inputs:
   - name: converted_model
     type: Model
@@ -522,7 +522,7 @@ implementation:
             log(f"Composite Mean: {compact_results['composite_mean']:.4f}")
         if compact_results.get("math_mean"):
             log(f"Math Mean: {compact_results['math_mean']:.4f}")
-        log(f"CO2 Emissions: {co2_str} kg")
+        log(f"CO2 Emissions: {co2_val} kg")
 
         # Print machine-readable JSON for parsing
         try:
