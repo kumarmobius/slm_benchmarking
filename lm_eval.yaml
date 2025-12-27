@@ -1,4 +1,4 @@
-name: BenchmarksEvals v3
+name: BenchmarksEvals v4
 inputs:
   - name: converted_model
     type: Model
@@ -40,19 +40,8 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/gemma-lm-eval:v1
+    image: kumar2004/latest:v4
     command:
-      - sh
-      - -c
-      - |
-          (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-            'torch>=2.6.0' \
-            'immutabledict' \
-            'psutil' \
-          || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-            'torch>=2.6.0' \
-            'immutabledict' \
-            'psutil' --user)
       - python3
       - -u
       - -c
