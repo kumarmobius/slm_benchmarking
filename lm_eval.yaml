@@ -529,7 +529,7 @@ implementation:
                 "compact": safe_json(compact_results),
                 "full": safe_json(full_results),
                 "schema": schema_results,
-                "co2_kg": co2_str,
+                "co2_kg": compact_results.get("co2_emissions_kg", 0.0),
                 "save_errors": save_errors if save_errors else None
             }
         except Exception as e:
