@@ -222,8 +222,11 @@ implementation:
                     )
                 return logits, loss
         
+        print("[INFO] Loading model config...")
         with open(args.model_config, "r") as f:
             cfg = json.load(f)
+        
+        print(f"[INFO] Original config loaded: {cfg.get('n_layers', 'N/A')} layers")
         
         # Convert dtype string to torch dtype
         dtype_map = {
@@ -244,9 +247,31 @@ implementation:
                 print(f"[INFO] Converted dtype '{dtype_str}' to {cfg['dtype']}")
             else:
                 print(f"[INFO] dtype already in correct format: {cfg['dtype']}")
+        else:
+            cfg["dtype"] = torch.float32
+            print(f"[INFO] No dtype specified, defaulting to torch.float32")
         
+        # Normalize layer_types to all full_attention
+        if "n_layers" in cfg:
+            original_layer_types = cfg.get("layer_types", [])
+            cfg["layer_types"] = ["full_attention"] * cfg["n_layers"]
+            print(f"[INFO] Normalized layer_types from {original_layer_types} to all 'full_attention' for {cfg['n_layers']} layers")
+        else:
+            print("[WARNING] 'n_layers' not found in config")
+        
+        # Normalize qk_norm to proper boolean
         if "qk_norm" in cfg:
-            cfg["qk_norm"] = bool(cfg["qk_norm"])
+            qk_norm_value = cfg["qk_norm"]
+            # Handle various boolean representations
+            if isinstance(qk_norm_value, bool):
+                cfg["qk_norm"] = qk_norm_value
+            elif isinstance(qk_norm_value, str):
+                cfg["qk_norm"] = qk_norm_value.lower() in ("true", "1", "yes", "y")
+            elif isinstance(qk_norm_value, (int, float)):
+                cfg["qk_norm"] = bool(qk_norm_value)
+            else:
+                cfg["qk_norm"] = False
+            print(f"[INFO] Normalized qk_norm from '{qk_norm_value}' to {cfg['qk_norm']}")
         
         print("[INFO] Loading tokenizer...")
         tokenizer = Tokenizer.from_file(args.tokenizer_json)
@@ -271,6 +296,7 @@ implementation:
             pickle.dump(gemma_lm, f)
         
         print("[OK] Gemma3LM object created and saved successfully")
+        print(f"[OK] Final config - dtype: {cfg['dtype']}, layer_types: {cfg['layer_types']}")
     args:
       - --tokenizer_json
       - { inputPath: tokenizer_json }
