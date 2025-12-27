@@ -642,18 +642,17 @@ implementation:
             try:
                 emissions = tracker.stop()
                 try:
-                    emissions_val = float(emissions) if emissions is not None else 0.0
-                    co2_str = f"{emissions_val:.6f}"
+                    co2_val = float(emissions) if emissions is not None else 0.0
                 except Exception:
-                    co2_str = "0.000000"
+                    co2_val = 0.0
             except Exception as e:
                 log(f"⚠ Failed to stop emissions tracker: {e}")
-                co2_str = "0.000000"
+                co2_val = 0.0
             
-            compact_results["co2_emissions_kg"] = co2_str
-            full_results["co2_emissions_kg"] = co2_str
-            schema_results["co2_emissions_kg"] = co2_str
-            log(f"✓ CO2 emissions: {co2_str} kg")
+            compact_results["co2_emissions_kg"] = round(co2_val, 6)
+            full_results["co2_emissions_kg"] = round(co2_val, 6)
+            schema_results["co2_emissions_kg"] = round(co2_val, 6)
+            log(f"✓ CO2 emissions: {co2_val:.6f} kg")
             
             # Calculate composite mean (use ORIGINAL names)
             composite_values = []
