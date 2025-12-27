@@ -409,6 +409,7 @@ implementation:
         compact_results["co2_emissions_kg"] = round(co2_val, 6)
         full_results["co2_emissions_kg"] = round(co2_val, 6)
         schema_results["co2_emissions_kg"] = round(co2_val, 6)
+        schema_results["ModelName"] = "GPTNeoX"  
         log(f"✓ CO2 emissions: {co2_val:.6f} kg")
 
         # Compute composite mean over defined group (use ORIGINAL names)
