@@ -5,7 +5,6 @@ inputs:
   - {name: schema_id, type: String, description: "Schema ID for the entity instances"}
   - {name: project_id, type: String, optional: true, default: "-1", description: "Project ID (use '-1' to skip)"}
   - {name: model_id, type: String, optional: true, default: "-1", description: "Model ID (use '-1' to skip)"}
-  - {name: execution_id, type: Integer, optional: true, default: "-1", description: "Execution ID (use -1 to skip)"}
 
 outputs:
   - {name: config_cdn, type: String, description: "Config CDN URL"}
@@ -14,7 +13,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtest4
+    image: python:3.8
     command:
       - python3
       - -u
@@ -32,7 +31,6 @@ implementation:
         parser.add_argument('--schema_id', required=True)
         parser.add_argument('--project_id', default="-1")
         parser.add_argument('--model_id', default="-1")
-        parser.add_argument('--execution_id', type=int, default=-1)
         parser.add_argument('--config_cdn', required=True)
         parser.add_argument('--pt_cdn', required=True)
         parser.add_argument('--vocabulary_cdn', required=True)
@@ -60,12 +58,6 @@ implementation:
             print(f"[INFO] Including model_id in filter: {args.model_id}")
         else:
             print("[INFO] Skipping model_id (value is -1)")
-        
-        if args.execution_id != -1:
-            filter_obj["execution_id"] = args.execution_id
-            print(f"[INFO] Including execution_id in filter: {args.execution_id}")
-        else:
-            print("[INFO] Skipping execution_id (value is -1)")
 
         # Construct URL
         url = (
@@ -112,10 +104,10 @@ implementation:
             data = response.json()
             print(f"[DEBUG] API Response: {json.dumps(data, indent=2)}")
 
-            # Extract instances list
-            instances = data.get("data", [])
+            # Extract instances list from 'content' key
+            instances = data.get("content", [])
             if not instances:
-                print("[ERROR] No instances found in response", file=sys.stderr)
+                print("[ERROR] No instances found in response content", file=sys.stderr)
                 sys.exit(1)
 
             # Get first instance
@@ -178,8 +170,6 @@ implementation:
       - {inputValue: project_id}
       - --model_id
       - {inputValue: model_id}
-      - --execution_id
-      - {inputValue: execution_id}
       - --config_cdn
       - {outputPath: config_cdn}
       - --pt_cdn
