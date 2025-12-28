@@ -206,4 +206,4 @@ implementation:
       - --num_fewshot
       - {inputValue: num_fewshot}
       - --trigger_response
-      - {outputPath: trigger_response}"
+      - {outputPath: trigger_response}
