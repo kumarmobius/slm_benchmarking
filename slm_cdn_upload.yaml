@@ -3,14 +3,12 @@ inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer / vocabulary JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
   - { name: model_config, type: Data, description: "Model config file (json/yaml)" }
-
   - { name: bearer_token, type: string, description: "Path to bearer token file" }
   - { name: domain, type: String, description: "Upload API domain" }
   - { name: get_cdn, type: String, description: "CDN base URL" }
-
+  - { name: model_name, type: String, description: "Name of the model" }
 outputs:
   - { name: schema_json, type: String, description: "Final schema JSON with CDN URLs and timestamp" }
-
 implementation:
   container:
     image: python:3.8
@@ -20,26 +18,33 @@ implementation:
       - -c
       - |
         import argparse, subprocess, json, os, time, sys, traceback
-
         parser = argparse.ArgumentParser()
         parser.add_argument("--tokenizer_json", required=True)
         parser.add_argument("--model_pt", required=True)
         parser.add_argument("--model_config", required=True)
-
         parser.add_argument("--bearer_token", required=True)
         parser.add_argument("--domain", required=True)
         parser.add_argument("--get_cdn", required=True)
-
+        parser.add_argument("--model_name", required=True)
         parser.add_argument("--schema_json", required=True)
         args = parser.parse_args()
-
+        
+        def encode_special_chars(text):
+            text = text.replace("$", "%24")
+            text = text.replace("(", "%28")
+            text = text.replace(")", "%29")
+            text = text.replace("[", "%5B")
+            text = text.replace("]", "%5D")
+            text = text.replace("{", "%7B")
+            text = text.replace("}", "%7D")
+            return text
+        
         def upload(file_path, token):
             url = (
                 f"{args.domain.rstrip('/')}"
                 "/mobius-content-service/v1.0/content/upload"
                 "?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
             )
-
             cmd = [
                 "curl",
                 "--location", url,
@@ -48,39 +53,55 @@ implementation:
                 "--fail",
                 "--show-error"
             ]
-
             p = subprocess.run(cmd, capture_output=True)
             if p.returncode != 0:
                 raise RuntimeError(p.stderr.decode())
-
             resp = json.loads(p.stdout.decode())
             cdn_rel = resp.get("cdnUrl")
             if not cdn_rel:
                 raise ValueError("cdnUrl missing in response")
-
             return f"{args.get_cdn.rstrip('/')}{cdn_rel}"
-
+        
         try:
             with open(args.bearer_token, "r") as f:
                 token = f.read().strip()
-
+            
+            # Upload files and get CDN URLs
             vocab_cdn = upload(args.tokenizer_json, token)
             pt_cdn = upload(args.model_pt, token)
             config_cdn = upload(args.model_config, token)
-
+            
+            print("[INFO] Raw CDN URLs generated:")
+            print(f"  - Vocabulary: {vocab_cdn}")
+            print(f"  - Model PT: {pt_cdn}")
+            print(f"  - Config: {config_cdn}")
+            
+            # Encode special characters in CDN URLs
+            vocab_cdn_encoded = encode_special_chars(vocab_cdn)
+            pt_cdn_encoded = encode_special_chars(pt_cdn)
+            config_cdn_encoded = encode_special_chars(config_cdn)
+            
+            print("[INFO] Encoded CDN URLs:")
+            print(f"  - Vocabulary: {vocab_cdn_encoded}")
+            print(f"  - Model PT: {pt_cdn_encoded}")
+            print(f"  - Config: {config_cdn_encoded}")
+            
+            # Create schema with encoded URLs
             schema = {
+                "model_name": args.model_name,
                 "timestamp": int(time.time()),
-                "config_cdn": config_cdn,
-                "pt_cdn": pt_cdn,
-                "vocabulary_cdn": vocab_cdn
+                "config_cdn": config_cdn_encoded,
+                "pt_cdn": pt_cdn_encoded,
+                "vocabulary_cdn": vocab_cdn_encoded
             }
-
+            
+            # Write schema to output
             with open(args.schema_json, "w") as f:
                 json.dump(schema, f)
-
-            print("[INFO] Upload successful")
+            
+            print("[INFO] Upload successful - Schema saved with encoded URLs")
             print(json.dumps(schema, indent=2))
-
+            
         except Exception as e:
             print("ERROR:", str(e), file=sys.stderr)
             traceback.print_exc()
@@ -92,13 +113,13 @@ implementation:
       - { inputPath: model_pt }
       - --model_config
       - { inputPath: model_config }
-
       - --bearer_token
       - { inputPath: bearer_token }
       - --domain
       - { inputValue: domain }
       - --get_cdn
       - { inputValue: get_cdn }
-
+      - --model_name
+      - { inputValue: model_name }
       - --schema_json
       - { outputPath: schema_json }
