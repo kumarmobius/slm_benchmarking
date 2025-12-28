@@ -1,0 +1,209 @@
+name: LLM Evaluation Pipeline Trigger
+inputs:
+  # Authentication and domain
+  - {name: bearer_token, type: string, description: "Path to file containing bearer token"}
+  - {name: domain, type: String, description: "Base domain, e.g. https://ig.gov-cloud.ai"}
+  
+  # Experiment tracking
+  - {name: experiment_id, type: String, description: "Experiment ID"}
+  - {name: model_id, type: String, description: "Model ID"}
+  - {name: project_id, type: String, description: "Project ID"}
+  - {name: execution_id, type: Integer, description: "Execution ID"}
+  
+  # Pipeline selection
+  - {name: model_name, type: String, description: "Model name: 'gemma' or 'gptneox'"}
+  - {name: gemma_pipeline, type: String, description: "Pipeline ID for Gemma model"}
+  - {name: gptneox_pipeline, type: String, description: "Pipeline ID for GPTNeoX model"}
+  
+  # Model artifacts
+  - {name: tokenizer_url, type: String, description: "URL to tokenizer artifact"}
+  - {name: pt_url, type: String, description: "URL to PyTorch model weights"}
+  - {name: config_url, type: String, description: "URL to model config file"}
+  
+  # Evaluation parameters
+  - {name: hf_token, type: String, optional: true, default: "", description: "Hugging Face authentication token for gated datasets/models"}
+  - {name: tasks, type: String, optional: true, default: "gpqa,mmlu_pro,bbh,math,ifeval", description: "Comma-separated list of tasks to evaluate. Use 'math' for hendrycks_math"}
+  - {name: limit, type: Integer, optional: true, default: 100, description: "Number of examples to evaluate per task. Use -1 for all examples"}
+  - {name: batch_size, type: Integer, optional: true, default: 6, description: "Batch size for evaluation. Use -1 for auto batch size"}
+  - {name: num_fewshot, type: Integer, optional: true, default: 0, description: "Number of few-shot examples to use for evaluation"}
+
+outputs:
+  - {name: trigger_response, type: String, description: "Raw response from pipeline trigger API"}
+
+implementation:
+  container:
+    image: kumar2004/mobius:1.0
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import json
+        import os
+        import sys
+        import requests
+
+        parser = argparse.ArgumentParser(description="Trigger LLM evaluation pipeline")
+        parser.add_argument('--bearer_token', required=True)
+        parser.add_argument('--domain', required=True)
+        parser.add_argument('--experiment_id', required=True)
+        parser.add_argument('--model_id', required=True)
+        parser.add_argument('--project_id', required=True)
+        parser.add_argument('--execution_id', type=int, required=True)
+        parser.add_argument('--model_name', required=True)
+        parser.add_argument('--gemma_pipeline', required=True)
+        parser.add_argument('--gptneox_pipeline', required=True)
+        parser.add_argument('--tokenizer_url', required=True)
+        parser.add_argument('--pt_url', required=True)
+        parser.add_argument('--config_url', required=True)
+        parser.add_argument('--hf_token', default="")
+        parser.add_argument('--tasks', default="gpqa,mmlu_pro,bbh,math,ifeval")
+        parser.add_argument('--limit', type=int, default=100)
+        parser.add_argument('--batch_size', type=int, default=6)
+        parser.add_argument('--num_fewshot', type=int, default=0)
+        parser.add_argument('--trigger_response', required=True)
+        args = parser.parse_args()
+
+        # Determine which pipeline to trigger based on model_name
+        model_name_lower = args.model_name.lower()
+        if model_name_lower == "gemma":
+            pipeline_id = args.gemma_pipeline
+            print(f"[INFO] Model name is '{args.model_name}', triggering Gemma pipeline")
+        elif model_name_lower == "gptneox":
+            pipeline_id = args.gptneox_pipeline
+            print(f"[INFO] Model name is '{args.model_name}', triggering GPTNeoX pipeline")
+        else:
+            print(f"[ERROR] Invalid model_name: '{args.model_name}'. Must be 'gemma' or 'gptneox'", file=sys.stderr)
+            sys.exit(1)
+
+        # Read bearer token
+        with open(args.bearer_token, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+
+        # Construct URL
+        url = (
+            f"{args.domain.rstrip('/')}"
+            f"/bob-service-test/v1.0/pipeline/trigger/ml"
+            f"?pipelineId={pipeline_id}"
+        )
+
+        # Build parameters object - include all evaluation parameters
+        parameters = {
+            "model_id": args.model_id,
+            "project_id": args.project_id,
+            "execution_id": args.execution_id,
+            "tokenizer_url": args.tokenizer_url,
+            "pt_url": args.pt_url,
+            "config_url": args.config_url,
+            "tasks": args.tasks,
+            "limit": args.limit,
+            "batch_size": args.batch_size,
+            "num_fewshot": args.num_fewshot
+        }
+        
+        # Only include hf_token if it's not empty
+        if args.hf_token:
+            parameters["hf_token"] = args.hf_token
+
+        # Build payload
+        payload = {
+            "pipelineType": "ML",
+            "containerResources": {},
+            "experimentId": args.experiment_id,
+            "enableCaching": True,
+            "parameters": parameters,
+            "version": 1
+        }
+
+        # Headers
+        headers = {
+            "accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        # Print debug information
+        print(f"[DEBUG] Triggering pipeline at: {url}")
+        print(f"[DEBUG] Selected Pipeline ID: {pipeline_id}")
+        print(f"[DEBUG] Model Name: {args.model_name}")
+        print(f"[DEBUG] Experiment ID: {args.experiment_id}")
+        print(f"[DEBUG] Model ID: {args.model_id}")
+        print(f"[DEBUG] Execution ID: {args.execution_id}")
+        print(f"[DEBUG] Evaluation Tasks: {args.tasks}")
+        print(f"[DEBUG] Payload: {json.dumps(payload, indent=2)}")
+        
+        # Make the request
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            
+            if not resp.ok:
+                error_detail = ""
+                try:
+                    error_json = resp.json()
+                    error_detail = json.dumps(error_json, indent=2)
+                except:
+                    error_detail = resp.text
+                
+                print(f"[ERROR] Trigger failed with status {resp.status_code}", file=sys.stderr)
+                print(f"[ERROR] Response: {error_detail}", file=sys.stderr)
+                
+                if resp.status_code == 404:
+                    print("[ERROR] Pipeline not found. Please verify:", file=sys.stderr)
+                    print(f"  - Pipeline ID is correct: {pipeline_id}", file=sys.stderr)
+                    print(f"  - Model name is correct: {args.model_name}", file=sys.stderr)
+                elif resp.status_code == 401 or resp.status_code == 403:
+                    print("[ERROR] Authentication/Authorization failed", file=sys.stderr)
+                
+                resp.raise_for_status()
+
+            # Write response
+            response_text = resp.text
+            os.makedirs(os.path.dirname(args.trigger_response), exist_ok=True)
+            with open(args.trigger_response, "w", encoding="utf-8") as f:
+                f.write(response_text)
+
+            print("[SUCCESS] Pipeline triggered successfully")
+            print(f"[SUCCESS] Response: {response_text}")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR] Request failed: {str(e)}", file=sys.stderr)
+            raise
+
+    args:
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --domain
+      - {inputValue: domain}
+      - --experiment_id
+      - {inputValue: experiment_id}
+      - --model_id
+      - {inputValue: model_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --model_name
+      - {inputValue: model_name}
+      - --gemma_pipeline
+      - {inputValue: gemma_pipeline}
+      - --gptneox_pipeline
+      - {inputValue: gptneox_pipeline}
+      - --tokenizer_url
+      - {inputValue: tokenizer_url}
+      - --pt_url
+      - {inputValue: pt_url}
+      - --config_url
+      - {inputValue: config_url}
+      - --hf_token
+      - {inputValue: hf_token}
+      - --tasks
+      - {inputValue: tasks}
+      - --limit
+      - {inputValue: limit}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_fewshot
+      - {inputValue: num_fewshot}
+      - --trigger_response
+      - {outputPath: trigger_response}"
