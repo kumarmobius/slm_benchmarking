@@ -108,13 +108,13 @@ implementation:
             raise
     args:
       - --tokenizer_json
-      - { inputValue: tokenizer_json }
+      - { inputPath: tokenizer_json }
       - --model_pt
-      - { inputValue: model_pt }
+      - { inputPath: model_pt }
       - --model_config
-      - { inputValue: model_config }
+      - { inputPath: model_config }
       - --bearer_token
-      - { inputValue: bearer_token }
+      - { inputPath: bearer_token }
       - --domain
       - { inputValue: domain }
       - --get_cdn
