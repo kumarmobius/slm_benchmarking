@@ -23,9 +23,9 @@ inputs:
   # Evaluation parameters
   - {name: hf_token, type: String, optional: true, default: "", description: "Hugging Face authentication token for gated datasets/models"}
   - {name: tasks, type: String, optional: true, default: "gpqa,mmlu_pro,bbh,math,ifeval", description: "Comma-separated list of tasks to evaluate. Use 'math' for hendrycks_math"}
-  - {name: limit, type: Integer, optional: true, default: 100, description: "Number of examples to evaluate per task. Use -1 for all examples"}
-  - {name: batch_size, type: Integer, optional: true, default: 6, description: "Batch size for evaluation. Use -1 for auto batch size"}
-  - {name: num_fewshot, type: Integer, optional: true, default: 0, description: "Number of few-shot examples to use for evaluation"}
+  - {name: limit, type: Integer, optional: true, default: "100", description: "Number of examples to evaluate per task. Use -1 for all examples"}
+  - {name: batch_size, type: Integer, optional: true, default: "6", description: "Batch size for evaluation. Use -1 for auto batch size"}
+  - {name: num_fewshot, type: Integer, optional: true, default: "0", description: "Number of few-shot examples to use for evaluation"}
 
 outputs:
   - {name: trigger_response, type: String, description: "Raw response from pipeline trigger API"}
