@@ -5,7 +5,7 @@ inputs:
   - {name: schema_id, type: String, description: "Schema ID for the entity instances"}
   - {name: project_id, type: String, optional: true, default: "-1", description: "Project ID (use '-1' to skip)"}
   - {name: model_id, type: String, optional: true, default: "-1", description: "Model ID (use '-1' to skip)"}
-  - {name: execution_id, type: Integer, optional: true, default: -1, description: "Execution ID (use -1 to skip)"}
+  - {name: execution_id, type: Integer, optional: true, default: "-1", description: "Execution ID (use -1 to skip)"}
 
 outputs:
   - {name: config_cdn, type: String, description: "Config CDN URL"}
