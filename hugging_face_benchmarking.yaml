@@ -1,4 +1,4 @@
-name: BenchmarksEvals V1 - HuggingFace
+name: BenchmarksEvals V2 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -247,7 +247,40 @@ implementation:
             traceback.print_exc()
             raise
 
-        # Helper functions
+        # ------------------------------------------------------------------
+        # Detect model context length and choose safe max_gen_toks
+        # ------------------------------------------------------------------
+        from transformers import AutoTokenizer
+        
+        try:
+            log("Detecting model maximum sequence length...")
+            tok = AutoTokenizer.from_pretrained(
+                MODEL_NAME,
+                cache_dir="/tmp/hf_cache",
+                use_fast=True
+            )
+        
+            model_max_len = getattr(tok, "model_max_length", None)
+        
+            # Some tokenizers lie (set to very large int)
+            if not model_max_len or model_max_len > 100_000:
+                model_max_len = 1024
+        
+            log(f"Model max sequence length = {model_max_len}")
+        
+        except Exception as e:
+            log(f"⚠ Could not detect tokenizer max length: {e}")
+            model_max_len = 1024
+        
+        # Must be STRICTLY less than model_max_len
+        DEFAULT_GEN_TOKS = 256
+        safe_max_gen_toks = min(DEFAULT_GEN_TOKS, model_max_len - 1)
+        safe_max_gen_toks = max(safe_max_gen_toks, 1)
+        
+        log(f"Using max_gen_toks = {safe_max_gen_toks}")
+        # ------------------------------------------------------------------
+
+        #
         def safe_json(obj):
             if isinstance(obj, dict):
                 return {k: safe_json(v) for k, v in obj.items()}
@@ -307,6 +340,7 @@ implementation:
                     tasks=[actual_task],
                     num_fewshot=args.num_fewshot,
                     limit=eval_limit,
+                    max_gen_toks=safe_max_gen_toks,
                 )
                 
                 duration = time.time() - start_time
