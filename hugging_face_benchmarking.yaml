@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.5 - HuggingFace
+name: BenchmarksEvals V4.6 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -54,9 +54,11 @@ implementation:
           torchvision==0.20.1 \
           torchaudio==2.5.1
         
-        # Step 3: Install your required packages
+        # Step 3: Install lm-evaluation-harness from GitHub (more reliable)
+        pip install --no-cache-dir git+https://github.com/EleutherAI/lm-evaluation-harness@v0.4.4
+        
+        # Step 4: Install other required packages
         pip install --no-cache-dir \
-          lm-eval==0.4.4 \
           transformers>=4.35.0 \
           accelerate>=0.25.0 \
           datasets>=2.14.0 \
@@ -74,24 +76,11 @@ implementation:
           einops>=0.7.0 \
           scipy>=1.11.0
         
-        exec "$0" "$@"
-      - python3
+        exec python3 "$@"
       - -u
       - -c
       - |
         import sys
-        # # =====================================================
-        # # BLOCK TORCHVISION (circular import fix)
-        # # =====================================================
-        # original_import = __builtins__.__import__
-        # def block_torchvision(name, *args, **kwargs):
-        #     if "torchvision" in name:
-        #         import types
-        #         dummy = types.ModuleType(name)
-        #         sys.modules[name] = dummy
-        #         return dummy
-        #     return original_import(name, *args, **kwargs)
-        # __builtins__.__import__ = block_torchvision
         import argparse
         import os
         import json
