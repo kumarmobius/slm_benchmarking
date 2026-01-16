@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.3 - HuggingFace
+name: BenchmarksEvals V4.4 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -46,9 +46,10 @@ implementation:
       - -c
       - |
         PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          'torch==2.2.2' \
-          'torchvision==0.17.2' \
-          'torchaudio==2.2.2' \
+          'torch==2.5.1' \
+          'torchvision==0.20.1' \
+          'torchaudio==2.5.1' \
+          'triton>=3.0.0' \
           'lm-eval==0.4.4' \
           'transformers>=4.35.0' \
           'accelerate>=0.25.0' \
