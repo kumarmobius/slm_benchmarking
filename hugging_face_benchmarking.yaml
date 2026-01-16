@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.6 - HuggingFace
+name: BenchmarksEvals V4.7 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -64,6 +64,7 @@ implementation:
           datasets>=2.14.0 \
           evaluate>=0.4.0 \
           scikit-learn>=1.3.0 \
+          codecarbon>=2.3.0 \
           pandas>=2.0.0 \
           numpy<2.0.0 \
           tqdm>=4.65.0 \
