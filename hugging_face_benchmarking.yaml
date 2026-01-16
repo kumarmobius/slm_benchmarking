@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.4 - HuggingFace
+name: BenchmarksEvals V4.5 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -45,28 +45,35 @@ implementation:
       - sh
       - -c
       - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          'torch==2.5.1' \
-          'torchvision==0.20.1' \
-          'torchaudio==2.5.1' \
-          'triton>=3.0.0' \
-          'lm-eval==0.4.4' \
-          'transformers>=4.35.0' \
-          'accelerate>=0.25.0' \
-          'datasets>=2.14.0' \
-          'evaluate>=0.4.0' \
-          'scikit-learn>=1.3.0' \
-          'pandas>=2.0.0' \
-          'numpy<2.0.0' \
-          'tqdm>=4.65.0' \
-          'sentencepiece>=0.1.99' \
-          'protobuf>=3.20.0' \
-          'tokenizers>=0.13.0' \
-          'codecarbon>=2.3.0' \
-          'peft>=0.7.0' \
-          'bitsandbytes>=0.41.0' \
-          'einops>=0.7.0' \
-          'scipy>=1.11.0'
+        # Step 1: Remove ALL conflicting packages
+        pip uninstall -y torch torchvision torchaudio xformers torchao unsloth-zoo triton nesy-factory 2>/dev/null || true
+        
+        # Step 2: Install compatible PyTorch ecosystem
+        pip install --no-cache-dir \
+          torch==2.5.1 \
+          torchvision==0.20.1 \
+          torchaudio==2.5.1
+        
+        # Step 3: Install your required packages
+        pip install --no-cache-dir \
+          lm-eval==0.4.4 \
+          transformers>=4.35.0 \
+          accelerate>=0.25.0 \
+          datasets>=2.14.0 \
+          evaluate>=0.4.0 \
+          scikit-learn>=1.3.0 \
+          pandas>=2.0.0 \
+          numpy<2.0.0 \
+          tqdm>=4.65.0 \
+          sentencepiece>=0.1.99 \
+          protobuf>=3.20.0 \
+          tokenizers>=0.13.0 \
+          codecarbon>=2.3.0 \
+          peft>=0.7.0 \
+          bitsandbytes>=0.41.0 \
+          einops>=0.7.0 \
+          scipy>=1.11.0
+        
         exec "$0" "$@"
       - python3
       - -u
