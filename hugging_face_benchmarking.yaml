@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4 - HuggingFace
+name: BenchmarksEvals V4.1 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -48,7 +48,6 @@ implementation:
         PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
           'lm-eval==0.4.4' \
           'transformers>=4.35.0' \
-          'torch>=2.0.0' \
           'accelerate>=0.25.0' \
           'datasets>=2.14.0' \
           'evaluate>=0.4.0' \
