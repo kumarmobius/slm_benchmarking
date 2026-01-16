@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.7 - HuggingFace
+name: BenchmarksEvals V4.8 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -48,7 +48,6 @@ implementation:
         # Step 1: Remove ALL conflicting packages
         pip uninstall -y torch torchvision torchaudio xformers torchao unsloth-zoo triton nesy-factory 2>/dev/null || true
         
-        # Step 2: Install compatible PyTorch ecosystem
         pip install --no-cache-dir \
           torch==2.5.1 \
           torchvision==0.20.1 \
@@ -64,7 +63,6 @@ implementation:
           datasets>=2.14.0 \
           evaluate>=0.4.0 \
           scikit-learn>=1.3.0 \
-          codecarbon>=2.3.0 \
           pandas>=2.0.0 \
           numpy<2.0.0 \
           tqdm>=4.65.0 \
@@ -77,10 +75,8 @@ implementation:
           einops>=0.7.0 \
           scipy>=1.11.0
         
-        exec python3 "$@"
-      - -u
-      - -c
-      - |
+        # Create a Python script file
+        cat > /tmp/evaluate.py << 'EOF'
         import sys
         import argparse
         import os
@@ -560,6 +556,8 @@ implementation:
             log(f"⚠ Completed with {len(save_errors)} error(s)")
         else:
             log("✓ BenchmarksEvals v1 completed successfully")
+        EOF
+        python3 -u /tmp/evaluate.py "$@"
 
     args:
       - --model_name
