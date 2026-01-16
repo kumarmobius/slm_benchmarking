@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.2 - HuggingFace
+name: BenchmarksEvals V4.3 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -46,6 +46,9 @@ implementation:
       - -c
       - |
         PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          'torch==2.2.2' \
+          'torchvision==0.17.2' \
+          'torchaudio==2.2.2' \
           'lm-eval==0.4.4' \
           'transformers>=4.35.0' \
           'accelerate>=0.25.0' \
@@ -69,18 +72,18 @@ implementation:
       - -c
       - |
         import sys
-        # =====================================================
-        # BLOCK TORCHVISION (circular import fix)
-        # =====================================================
-        original_import = __builtins__.__import__
-        def block_torchvision(name, *args, **kwargs):
-            if "torchvision" in name:
-                import types
-                dummy = types.ModuleType(name)
-                sys.modules[name] = dummy
-                return dummy
-            return original_import(name, *args, **kwargs)
-        __builtins__.__import__ = block_torchvision
+        # # =====================================================
+        # # BLOCK TORCHVISION (circular import fix)
+        # # =====================================================
+        # original_import = __builtins__.__import__
+        # def block_torchvision(name, *args, **kwargs):
+        #     if "torchvision" in name:
+        #         import types
+        #         dummy = types.ModuleType(name)
+        #         sys.modules[name] = dummy
+        #         return dummy
+        #     return original_import(name, *args, **kwargs)
+        # __builtins__.__import__ = block_torchvision
         import argparse
         import os
         import json
