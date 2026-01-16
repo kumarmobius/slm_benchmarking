@@ -40,7 +40,7 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/latest:v4
+    image: gurpreetgandhi/nesy-factory:v38-gpu
     command:
       - python3
       - -u
