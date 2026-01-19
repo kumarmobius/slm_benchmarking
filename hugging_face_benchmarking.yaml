@@ -1,4 +1,4 @@
-name: BenchmarksEvals V4.1 - HuggingFace
+name: BenchmarksEvals V5.2 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -84,6 +84,7 @@ implementation:
         from lm_eval.models.huggingface import HFLM
         from lm_eval.tasks import TaskManager
         from codecarbon import EmissionsTracker
+        from transformers import AutoTokenizer
 
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -270,10 +271,6 @@ implementation:
             traceback.print_exc()
             raise
 
-        # ------------------------------------------------------------------
-        # Detect model context length and choose safe max_gen_toks
-        # ------------------------------------------------------------------
-        from transformers import AutoTokenizer
         
         try:
             log("Detecting model maximum sequence length...")
@@ -363,7 +360,7 @@ implementation:
                     tasks=[actual_task],
                     num_fewshot=args.num_fewshot,
                     limit=eval_limit,
-                    gen_kwargs={"max_gen_toks": safe_max_gen_toks}  
+                    gen_kwargs=f"max_gen_toks={safe_max_gen_toks}"  
                 )
                 
                 duration = time.time() - start_time
