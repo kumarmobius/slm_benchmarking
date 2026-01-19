@@ -1,4 +1,4 @@
-name: BenchmarksEvals V5.2 - HuggingFace
+name: BenchmarksEvals V5.3 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -40,7 +40,7 @@ outputs:
 
 implementation:
   container:
-    image: kushagra4761/nesy-factory:t2.6
+    image: kushagra4761/nesy-factory-gpu:t2.6
     command:
       - sh
       - -c
