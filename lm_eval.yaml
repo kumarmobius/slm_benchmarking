@@ -1,4 +1,4 @@
-name: BenchmarksEvals v7
+name: BenchmarksEvals v7.1
 inputs:
   - name: converted_model
     type: Model
@@ -65,8 +65,6 @@ implementation:
           'einops>=0.7.0' \
           'immutabledict' \
           'psutil' \
-          'shutil' \
-          'argparse' \
           'scipy>=1.11.0'
         exec "$0" "$@"
       - python3
