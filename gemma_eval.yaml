@@ -1,4 +1,4 @@
-name: GemmaLMEval V10.7
+name: GemmaLMEval V10.8
 inputs:
   - name: gemma_model
     type: Data
@@ -262,10 +262,21 @@ implementation:
 
         class Gemma3LM(LM):
             def __init__(self, model, tokenizer, device="cuda"):
+                super().__init__()  # Initialize parent class
                 self.model = model.to(device)
                 self.model.eval()
                 self.tokenizer = tokenizer
                 self.device = device
+                self._rank = 0  # Required by lm_eval
+                self._world_size = 1  # Required by lm_eval
+            
+            @property
+            def rank(self):
+                return self._rank
+            
+            @property
+            def world_size(self):
+                return self._world_size
         
             @property
             def max_length(self):
@@ -277,7 +288,15 @@ implementation:
         
             @property
             def eos_token_id(self):
-                return self.tokenizer.token_to_id("</s>")  # or tokenizer.eos_token_id if HF tokenizer
+                return self.tokenizer.token_to_id("</s>")
+            
+            @property
+            def eot_token_id(self):
+                return self.eos_token_id
+            
+            @property
+            def batch_size(self):
+                return 1
         
             def tok_encode(self, text):
                 return self.tokenizer.encode(text).ids
@@ -323,11 +342,16 @@ implementation:
                     results.append((ll, True))
         
                 return results
-
+            
             def loglikelihood_rolling(self, requests):
                 results = []
                 for text, in requests:
                     tokens = self.tok_encode(text)
+                    
+                    if len(tokens) == 0:
+                        results.append((0.0,))
+                        continue
+                        
                     logits = self._model_call(tokens)
                     log_probs = F.log_softmax(logits[0, :-1], dim=-1)
                     
@@ -341,11 +365,25 @@ implementation:
             def generate_until(self, requests):
                 results = []
                 for context, gen_kwargs in requests:
-                    # Simple implementation - you can enhance this
+                    # Simple implementation - just return the context
+                    # For a real implementation, you'd need to implement actual generation
                     input_ids = self.tok_encode(context)
                     generated = self.tok_decode(input_ids)
                     results.append(generated)
                 return results
+            
+            def to(self, device):
+                self.device = device
+                self.model = self.model.to(device)
+                return self
+            
+            def half(self):
+                self.model = self.model.half()
+                return self
+            
+            def eval(self):
+                self.model.eval()
+                return self
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
