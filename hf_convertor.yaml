@@ -1,4 +1,4 @@
-name: HFConvertor
+name: HFConvertor v1
 inputs:
   - name: tokenizer_json
     type: Model
@@ -9,10 +9,6 @@ inputs:
   - name: model_config_json
     type: Data
     description: Path to model config JSON file (optional)
-  - name: max_new_tokens
-    type: Integer
-    default: "80"
-    description: Maximum new tokens (kept for parity)
 outputs:
   - name: converted_model
     type: Model
@@ -42,14 +38,12 @@ implementation:
         parser.add_argument("--tokenizer_json", default="", help="tokenizer.json (optional)")
         parser.add_argument("--model_pt", required=True, help="Source checkpoint .pt/.bin")
         parser.add_argument("--model_config_json", default="", help="base config JSON (optional)")
-        parser.add_argument("--max_new_tokens", type=int, default=80, help="max new tokens")
         parser.add_argument("--out_converted", default="/tmp/outputs/converted_model/data", help="Artifact output dir")
         args = parser.parse_args()
 
         TOKENIZER_JSON = args.tokenizer_json
         SRC_PT = args.model_pt
         BASE_CFG_JSON = args.model_config_json
-        MAX_NEW_TOKENS = args.max_new_tokens
         OUT_CONVERTED = args.out_converted
 
         # Internal HF dir used as intermediate
@@ -59,7 +53,6 @@ implementation:
         print("  tokenizer_json:", TOKENIZER_JSON)
         print("  model_pt      :", SRC_PT)
         print("  config_json   :", BASE_CFG_JSON)
-        print("  max_new_tokens:", MAX_NEW_TOKENS)
         print("  out_converted :", OUT_CONVERTED)
         print("  intermediate_model_dir:", MODEL_DIR)
 
@@ -119,31 +112,22 @@ implementation:
             except Exception:
                 base_cfg = {}
 
-        # GPT-NeoX conversion branch (only)
-        print("[CONVERT] Running GPT-NeoX conversion (single-mode)")
+        # GPT-NeoX conversion
+        print("[CONVERT] Running GPT-NeoX conversion")
 
         def normalize_keys_neox(orig_sd):
-            od = OrderedDict(orig_sd)
-            has_prefix = any(k.startswith("gpt_neox.") for k in od.keys())
-            new_od = OrderedDict()
-            if not has_prefix:
-                for k, v in od.items():
-                    new_od["gpt_neox." + k] = v
-            else:
-                new_od = OrderedDict(od)
-            replacements = {
-                ".attention.qkv_proj.": ".attention.query_key_value.",
-                ".attention.out_proj.": ".attention.dense.",
-                ".final_layernorm.": ".final_layer_norm.",
-            }
-            remapped = OrderedDict()
-            for k, v in new_od.items():
-                newk = k
-                for old, new in replacements.items():
-                    if old in newk:
-                        newk = newk.replace(old, new)
-                remapped[newk] = v
-            return remapped
+            new_sd = OrderedDict()
+            for k, v in orig_sd.items():
+                # Add gpt_neox prefix if not present
+                if not k.startswith("gpt_neox."):
+                    newk = "gpt_neox." + k
+                else:
+                    newk = k
+                # Map your custom keys to HF format
+                newk = newk.replace(".qkv_proj.", ".attention.query_key_value.")
+                newk = newk.replace(".out_proj.", ".attention.dense.")
+                new_sd[newk] = v
+            return new_sd
 
         out = normalize_keys_neox(sd)
 
@@ -151,23 +135,13 @@ implementation:
         if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
             out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
-        # synthesize attention biases if absent
-        layer_ids = sorted({int(m.group(1)) for k in out.keys()
-                            for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
-        for i in layer_ids:
-            wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
-            wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
-            if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
-                out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = torch.zeros(wq.size(0), dtype=wq.dtype)
-            if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
-                out[f"gpt_neox.layers.{i}.attention.dense.bias"] = torch.zeros(wo.size(0), dtype=wo.dtype)
-
-        torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
-        print("[CONVERT] Wrote pytorch_model.bin (gptneox)")
-
+        # Validate BEFORE saving
         if "gpt_neox.embed_in.weight" not in out:
             print("[FATAL] checkpoint missing gpt_neox.embed_in.weight", file=sys.stderr)
             sys.exit(3)
+
+        torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+        print("[CONVERT] Wrote pytorch_model.bin (gptneox)")
 
         # infer dims
         vocab_size, hidden_size = out["gpt_neox.embed_in.weight"].shape
@@ -246,7 +220,5 @@ implementation:
       - {inputPath: model_pt}
       - --model_config_json
       - {inputPath: model_config_json}
-      - --max_new_tokens
-      - {inputValue: max_new_tokens}
       - --out_converted
       - {outputPath: converted_model}
