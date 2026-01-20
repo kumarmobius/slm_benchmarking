@@ -1,4 +1,4 @@
-name: GemmaLMEval V10.4
+name: GemmaLMEval V10.5
 inputs:
   - name: gemma_model
     type: Data
@@ -257,7 +257,72 @@ implementation:
                         reduction="mean"
                     )
                 return logits, loss
-   
+
+
+        class Gemma3LM(LM):
+            def __init__(self, model, tokenizer, device="cuda"):
+                self.model = model.to(device)
+                self.model.eval()
+                self.tokenizer = tokenizer
+                self.device = device
+        
+            @property
+            def max_length(self):
+                return self.model.cfg["context_length"]
+        
+            @property
+            def vocab_size(self):
+                return self.tokenizer.get_vocab_size()
+        
+            @property
+            def eos_token_id(self):
+                return self.tokenizer.token_to_id("</s>")  # or tokenizer.eos_token_id if HF tokenizer
+        
+            def tok_encode(self, text):
+                return self.tokenizer.encode(text).ids
+        
+            def tok_decode(self, tokens):
+                return self.tokenizer.decode(tokens)
+        
+            def _model_call(self, input_ids):
+                input_ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
+                with torch.no_grad():
+                    logits, _ = self.model(input_ids)
+                return logits
+        
+            def _model_generate(self, input_ids, max_length, **kwargs):
+                raise NotImplementedError()
+        
+            def loglikelihood(self, requests):
+                results = []
+        
+                for context, continuation in requests:
+                    ctx = self.tok_encode(context)
+                    cont = self.tok_encode(continuation)
+        
+                    input_ids = ctx + cont
+        
+                    excess = len(input_ids) - self.max_length
+                    if excess > 0:
+                        ctx = ctx[excess:]
+                        input_ids = ctx + cont
+        
+                    logits = self._model_call(input_ids)
+        
+                    start = max(len(ctx) - 1, 0)
+                    end = start + len(cont)
+        
+                    continuation_logits = logits[0, start:end]
+                    log_probs = F.log_softmax(continuation_logits, dim=-1)
+        
+                    ll = 0.0
+                    for i, tok_id in enumerate(cont):
+                        ll += log_probs[i, tok_id].item()
+        
+                    results.append((ll, True))
+        
+                return results
+
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
