@@ -1,4 +1,4 @@
-name: HFConvertor v1
+name: HFConvertor v2
 inputs:
   - name: tokenizer_json
     type: Model
@@ -114,6 +114,12 @@ implementation:
 
         # GPT-NeoX conversion
         print("[CONVERT] Running GPT-NeoX conversion")
+        
+        # DEBUG: Print original checkpoint keys
+        print("[DEBUG] Original checkpoint keys (first 20):")
+        for i, k in enumerate(list(sd.keys())[:20]):
+            print(f"  {i}: {k}")
+        print(f"[DEBUG] Total keys in checkpoint: {len(sd.keys())}")
 
         def normalize_keys_neox(orig_sd):
             new_sd = OrderedDict()
@@ -130,6 +136,12 @@ implementation:
             return new_sd
 
         out = normalize_keys_neox(sd)
+        
+        # DEBUG: Print normalized keys
+        print("[DEBUG] Normalized checkpoint keys (first 20):")
+        for i, k in enumerate(list(out.keys())[:20]):
+            print(f"  {i}: {k}")
+        print(f"[DEBUG] Total keys after normalization: {len(out.keys())}")
 
         # embed_out tie fallback
         if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
