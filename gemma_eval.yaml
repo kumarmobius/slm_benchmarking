@@ -1,4 +1,4 @@
-name: GemmaLMEval V10
+name: GemmaLMEval V10.1
 inputs:
   - name: gemma_model
     type: Data
@@ -92,7 +92,7 @@ implementation:
         from lm_eval import evaluator
         from lm_eval.tasks import TaskManager
         from codecarbon import EmissionsTracker
-
+        
         def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
             assert head_dim % 2 == 0
             inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
@@ -261,9 +261,6 @@ implementation:
                         reduction="mean"
                     )
                 return logits, loss
-
-
-
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
@@ -662,4 +659,309 @@ implementation:
             log(f"  Model: {args.gemma_model}")
             log(f"  Model Name: {args.model_name}")
             log(f"  Tasks: {args.tasks}")
-            log(f"  Few-shot: {args.num_few
+            log(f"  Few-shot: {args.num_fewshot}")
+            log(f"  Limit: {eval_limit if eval_limit is not None else 'ALL'}")
+            log(f"  Batch size: {eval_batch_size}")
+            log(f"  HF Token: {'***' + args.hf_token[-4:] if args.hf_token else 'None'}")
+
+            # Setup HF authentication
+            if args.hf_token:
+                os.environ["HF_TOKEN"] = args.hf_token
+                os.environ["HUGGINGFACE_HUB_TOKEN"] = args.hf_token
+                log("✓ HuggingFace authentication configured")
+
+            # Setup cache directories
+            os.environ.update({
+                "HF_HOME": "/tmp/hf_cache",
+                "HF_DATASETS_CACHE": "/tmp/hf_cache",
+                "HUGGINGFACE_HUB_CACHE": "/tmp/hf_cache",
+                "HF_HUB_DISABLE_TELEMETRY": "1"
+            })
+            log("✓ Cache directories configured")
+
+            # Create output directories
+            for path in [args.out_compact, args.out_full, args.out_schema, args.out_emissions]:
+                parent_dir = os.path.dirname(path)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
+
+            # Log system info
+            log_system_info()
+
+            # Load model
+            log(f"Loading model from: {args.gemma_model}")
+            if not os.path.exists(args.gemma_model):
+                log(f"✗ FATAL: Model file not found: {args.gemma_model}")
+                sys.exit(1)
+
+            try:
+                with open(args.gemma_model, "rb") as f:
+                    gemma_lm = pickle.load(f)
+                
+                # Validate model type
+                if not hasattr(gemma_lm, '_model'):
+                    log("✗ FATAL: Pickled object is not a valid Gemma3LM model")
+                    log(f"Object type: {type(gemma_lm)}")
+                    log("Expected object with '_model' attribute")
+                    sys.exit(1)
+                
+                log(f"✓ Model loaded: {type(gemma_lm)}")
+                
+                # Setup model device and precision
+                gemma_lm = setup_model_device(gemma_lm)
+                
+            except Exception as e:
+                log(f"✗ FATAL: Failed to load model: {e}")
+                traceback.print_exc()
+                sys.exit(1)
+
+            # Initialize TaskManager for task resolution
+            log("Initializing TaskManager...")
+            try:
+                task_manager = TaskManager()
+                log(f"✓ TaskManager initialized with {len(task_manager.task_index)} tasks")
+            except Exception as e:
+                log(f"⚠ Warning: TaskManager initialization failed: {e}")
+                task_manager = None
+
+            # Resolve task list with name mapping
+            actual_tasks, task_name_map = resolve_task_list(args.tasks, task_manager)
+            log(f"Tasks to evaluate ({len(actual_tasks)}): {actual_tasks}")
+            log(f"Task name mapping: {task_name_map}")
+
+            # Start emissions tracking
+            log(f"Starting emissions tracking -> {args.out_emissions}")
+            try:
+                tracker = EmissionsTracker(
+                    output_dir=os.path.dirname(args.out_emissions) or ".",
+                    output_file=os.path.basename(args.out_emissions)
+                )
+                tracker.start()
+                tracker_started = True
+            except Exception as e:
+                log(f"⚠ Emissions tracker failed to start: {e}")
+                tracker = None
+                tracker_started = False
+
+            # Evaluate all tasks
+            compact_results = {}
+            full_results = {}
+            schema_results = {}  # For schema_json with original names
+            
+            successful_tasks = 0
+
+            log("=" * 70)
+            log("Starting Task Evaluation")
+            log("=" * 70)
+
+            for idx, actual_task in enumerate(actual_tasks, 1):
+                original_task = task_name_map.get(actual_task, actual_task)
+
+                log(f"{'='*70}")
+                log(f"Task {idx}/{len(actual_tasks)}: {original_task}")
+                if actual_task != original_task:
+                    log(f"  (evaluating as: {actual_task})")
+                log(f"{'='*70}")
+
+                task_result = evaluate_single_task(
+                    gemma_lm, actual_task, original_task,
+                    args.num_fewshot, eval_limit,
+                    eval_batch_size, args.hf_token
+                )
+
+                # Store in full results with ORIGINAL name
+                full_results[original_task] = task_result
+
+                # Store in compact results with ORIGINAL name
+                if task_result["success"]:
+                    successful_tasks += 1
+                    compact_results[original_task] = {
+                        task_result["metric_name"]: task_result["metric_value"],
+                        "time_s": round(task_result["time_s"], 3)
+                    }
+                    # Store in schema with ORIGINAL name and percentage
+                    schema_results[original_task] = round(task_result["metric_value"] * 100.0, 2)
+                else:
+                    compact_results[original_task] = {
+                        "error": task_result["error"],
+                        "time_s": round(task_result["time_s"], 3)
+                    }
+
+            # Stop emissions tracking
+            co2_val = 0.0
+            if tracker_started:
+                log("Stopping emissions tracking...")
+                try:
+                    emissions = tracker.stop()
+                    if emissions is not None:
+                        try:
+                            co2_val = float(emissions)
+                            log(f"✓ CO2 emissions tracked: {co2_val:.6f} kg")
+                        except (ValueError, TypeError) as e:
+                            log(f"⚠ Could not parse CO2 value: {emissions}, error: {e}")
+                            co2_val = 0.0
+                    else:
+                        log("⚠ Emissions tracker returned None")
+                except Exception as e:
+                    log(f"⚠ Failed to stop emissions tracker: {e}")
+            else:
+                log("⚠ Emissions tracking was not active")
+
+            compact_results["co2_emissions_kg"] = round(co2_val, 6)
+            full_results["co2_emissions_kg"] = round(co2_val, 6)
+            schema_results["co2_emissions_kg"] = round(co2_val, 6)
+            schema_results["ModelName"] = args.model_name  # Use provided model name
+            
+            # Check if any tasks succeeded
+            if successful_tasks == 0:
+                log("✗ FATAL: No tasks completed successfully")
+                sys.exit(1)
+
+            # Calculate composite mean from ALL evaluated tasks with valid scores
+            composite_values = []
+            for original_task, entry in compact_results.items():
+                if original_task not in ["co2_emissions_kg", "composite_mean", "math_mean"]:
+                    if isinstance(entry, dict):
+                        for k, v in entry.items():
+                            if k not in ("time_s", "error") and isinstance(v, (int, float)):
+                                composite_values.append(float(v))
+                                break
+
+            if composite_values:
+                composite_mean = float(np.mean(composite_values))
+                compact_results["composite_mean"] = round(composite_mean, 6)
+                schema_results["composite_mean"] = round(composite_mean * 100.0, 2)
+                log(f"✓ Composite mean ({len(composite_values)} tasks): {composite_mean:.6f}")
+            else:
+                log(f"⚠ No valid scores found for composite mean calculation")
+
+            # Calculate math mean (include in schema too)
+            math_values = []
+            for original_task, entry in compact_results.items():
+                if original_task not in ["co2_emissions_kg", "composite_mean", "math_mean"]:
+                    if "math" in original_task.lower() and isinstance(entry, dict):
+                        for k, v in entry.items():
+                            if k not in ("time_s", "error") and isinstance(v, (int, float)):
+                                math_values.append(float(v))
+                                break
+
+            if math_values:
+                math_mean = float(np.mean(math_values))
+                compact_results["math_mean"] = round(math_mean, 6)
+                schema_results["math_mean"] = round(math_mean * 100.0, 2)  # Include in schema
+                log(f"✓ Math mean ({len(math_values)} tasks): {math_mean:.6f}")
+
+            # Save all outputs atomically
+            log("=" * 70)
+            log("Saving Results")
+            log("=" * 70)
+
+            save_errors = []
+
+            # Save compact results
+            if atomic_write(safe_json(compact_results), args.out_compact):
+                log(f"✓ Compact results: {args.out_compact}")
+            else:
+                err_msg = f"Failed to save compact results"
+                log(f"✗ {err_msg}")
+                save_errors.append(err_msg)
+
+            # Save full results
+            if atomic_write(safe_json(full_results), args.out_full):
+                log(f"✓ Full results: {args.out_full}")
+            else:
+                err_msg = f"Failed to save full results"
+                log(f"✗ {err_msg}")
+                save_errors.append(err_msg)
+
+            # Save schema JSON
+            if atomic_write(schema_results, args.out_schema):
+                log(f"✓ Schema JSON: {args.out_schema}")
+            else:
+                err_msg = f"Failed to save schema"
+                log(f"✗ {err_msg}")
+                save_errors.append(err_msg)
+
+            # Verify emissions CSV exists
+            try:
+                if os.path.exists(args.out_emissions):
+                    log(f"✓ Emissions CSV: {args.out_emissions}")
+                else:
+                    log(f"⚠ Emissions CSV not found at: {args.out_emissions}")
+            except Exception as e:
+                log(f"⚠ Failed to check emissions CSV: {e}")
+
+            # Print summary
+            log("=" * 70)
+            log("EVALUATION SUMMARY")
+            log("=" * 70)
+
+            for task, data in compact_results.items():
+                if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
+                    continue
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if k not in ("time_s", "error"):
+                            if isinstance(v, (int, float)):
+                                log(f"  {task}: {k} = {v:.6f}")
+                                break
+                            else:
+                                log(f"  {task}: {k} = {v}")
+                                break
+
+            if compact_results.get("composite_mean"):
+                log(f"Composite Mean: {compact_results['composite_mean']:.6f}")
+            if compact_results.get("math_mean"):
+                log(f"Math Mean: {compact_results['math_mean']:.6f}")
+            log(f"CO2 Emissions: {co2_val} kg")
+            log(f"Successful tasks: {successful_tasks}/{len(actual_tasks)}")
+
+            # Print machine-readable JSON
+            metric_payload = {
+                "compact": safe_json(compact_results),
+                "full": safe_json(full_results),
+                "schema": schema_results,
+                "co2_kg": compact_results.get("co2_emissions_kg", 0.0),
+                "successful_tasks": successful_tasks,
+                "total_tasks": len(actual_tasks),
+                "save_errors": save_errors if save_errors else None
+            }
+            metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"))
+            print(metric_line, flush=True)
+            print(metric_line, file=sys.stderr, flush=True)
+
+            # Final status
+            if save_errors:
+                log(f"⚠ Completed with {len(save_errors)} save error(s)")
+                for err in save_errors:
+                    log(f"  - {err}")
+            else:
+                log("=" * 70)
+                log("✓ Evaluation Pipeline Completed Successfully - Production Ready")
+                log("=" * 70)
+
+        if __name__ == "__main__":
+            main()
+    args:
+      - --gemma_model
+      - {inputPath: gemma_model}
+      - --tasks
+      - {inputValue: tasks}
+      - --num_fewshot
+      - {inputValue: num_fewshot}
+      - --limit
+      - {inputValue: limit}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --hf_token
+      - {inputValue: hf_token}
+      - --model_name
+      - {inputValue: model_name}
+      - --out_compact
+      - {outputPath: compact_metrics}
+      - --out_full
+      - {outputPath: full_results}
+      - --out_schema
+      - {outputPath: schema_json}
+      - --out_emissions
+      - {outputPath: emissions_csv}
