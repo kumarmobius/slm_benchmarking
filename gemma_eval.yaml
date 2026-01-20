@@ -1,4 +1,4 @@
-name: GemmaLMEval V10.9
+name: GemmaLMEval V11
 inputs:
   - name: gemma_model
     type: Data
@@ -934,7 +934,7 @@ implementation:
             schema_results["ModelName"] = model_name
             
             # FIX: Calculate composite mean from ALL evaluated tasks (not hardcoded list)
-            EXCLUDE_KEYS = {"co2_emissions_kg", "composite_mean", "math_mean"}
+            EXCLUDE_KEYS = {"co2_emissions_kg", "composite_mean"}
             
             composite_values = []
             for original_task, entry in compact_results.items():
@@ -964,11 +964,6 @@ implementation:
                         if metric_name is not None and metric_value is not None:
                             math_values.append(float(metric_value))
             
-            if math_values:
-                math_mean = float(np.mean(math_values))
-                compact_results["math_mean"] = round(math_mean, 6)
-                schema_results["math_mean"] = round(math_mean * 100.0, 2)
-                log(f"✓ Math mean ({len(math_values)} tasks): {math_mean:.6f}")
             
             # Save all outputs with atomic writes
             log("=" * 70)
@@ -1017,7 +1012,7 @@ implementation:
             log("=" * 70)
             
             for task, data in compact_results.items():
-                if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
+                if task in ("co2_emissions_kg", "composite_mean"):
                     continue
                 if isinstance(data, dict):
                     if "error" in data:
@@ -1031,8 +1026,6 @@ implementation:
             
             if compact_results.get("composite_mean"):
                 log(f"Composite Mean: {compact_results['composite_mean']:.6f}")
-            if compact_results.get("math_mean"):
-                log(f"Math Mean: {compact_results['math_mean']:.6f}")
             if "co2_emissions_kg" in compact_results:
                 log(f"CO2 Emissions: {compact_results['co2_emissions_kg']:.6f} kg")
             
