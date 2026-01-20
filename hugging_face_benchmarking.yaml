@@ -1,4 +1,4 @@
-name: BenchmarksEvals V5.4 - HuggingFace
+name: BenchmarksEvals V5.5 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -50,7 +50,7 @@ implementation:
           'transformers>=4.35.0' \
           'torch>=2.0.0' \
           'accelerate>=0.25.0' \
-          'datasets>=2.14.0' \
+          'datasets>=2.14.0,<4.0.0' \
           'evaluate>=0.4.0' \
           'scikit-learn>=1.3.0' \
           'pandas>=2.0.0' \
@@ -61,6 +61,7 @@ implementation:
           'tokenizers>=0.13.0' \
           'codecarbon>=2.3.0' \
           'peft>=0.7.0' \
+          'langdetect' \
           'bitsandbytes>=0.41.0' \
           'einops>=0.7.0' \
           'scipy>=1.11.0'
