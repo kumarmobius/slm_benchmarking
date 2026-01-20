@@ -1,4 +1,4 @@
-name: Build Gemma3LM v2.7
+name: Build Gemma3LM v2.8
 inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
@@ -92,37 +92,50 @@ implementation:
         
             def loglikelihood(self, requests):
                 results = []
-        
-                for context, continuation in requests:
+            
+                for request in requests:
+                    # Handle Instance objects from lm_eval
+                    if hasattr(request, 'args'):
+                        context, continuation = request.args
+                    else:
+                        context, continuation = request
+                    
                     ctx = self.tok_encode(context)
                     cont = self.tok_encode(continuation)
-        
+            
                     input_ids = ctx + cont
-        
+            
                     excess = len(input_ids) - self.max_length
                     if excess > 0:
                         ctx = ctx[excess:]
                         input_ids = ctx + cont
-        
+            
                     logits = self._model_call(input_ids)
-        
+            
                     start = max(len(ctx) - 1, 0)
                     end = start + len(cont)
-        
+            
                     continuation_logits = logits[0, start:end]
                     log_probs = F.log_softmax(continuation_logits, dim=-1)
-        
+            
                     ll = 0.0
                     for i, tok_id in enumerate(cont):
                         ll += log_probs[i, tok_id].item()
-        
+            
                     results.append((ll, True))
-        
+            
                 return results
+
             
             def loglikelihood_rolling(self, requests):
                 results = []
-                for text, in requests:
+                for request in requests:
+                    # Handle Instance objects from lm_eval
+                    if hasattr(request, 'args'):
+                        text, = request.args
+                    else:
+                        text, = request
+                        
                     tokens = self.tok_encode(text)
                     
                     if len(tokens) == 0:
@@ -141,9 +154,14 @@ implementation:
             
             def generate_until(self, requests):
                 results = []
-                for context, gen_kwargs in requests:
+                for request in requests:
+                    # Handle Instance objects from lm_eval
+                    if hasattr(request, 'args'):
+                        context, gen_kwargs = request.args
+                    else:
+                        context, gen_kwargs = request
+                        
                     # Simple implementation - just return the context
-                    # For a real implementation, you'd need to implement actual generation
                     input_ids = self.tok_encode(context)
                     generated = self.tok_decode(input_ids)
                     results.append(generated)
