@@ -1,4 +1,4 @@
-name: BenchmarksEvals V5.5 - HuggingFace
+name: BenchmarksEvals V5.6 - HuggingFace
 inputs:
   - name: model_name
     type: String
@@ -64,6 +64,7 @@ implementation:
           'langdetect' \
           'bitsandbytes>=0.41.0' \
           'einops>=0.7.0' \
+          'immutabledict' \
           'scipy>=1.11.0'
         exec "$0" "$@"
       - python3
