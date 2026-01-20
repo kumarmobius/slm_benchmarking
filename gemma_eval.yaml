@@ -1,4 +1,4 @@
-name: GemmaLMEval V9
+name: GemmaLMEval V10
 inputs:
   - name: gemma_model
     type: Data
@@ -23,6 +23,10 @@ inputs:
     type: String
     default: ""
     description: Hugging Face authentication token
+  - name: model_name
+    type: String
+    default: "Gemma3"
+    description: "Model name for schema (default: Gemma3)"
 outputs:
   - name: compact_metrics
     type: Data
@@ -37,13 +41,34 @@ outputs:
     type: Data
     description: CodeCarbon emissions CSV
 implementation:
-  container:
-    image: kumar2004/gemma-lm-eval:v1
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
     command:
       - sh
       - -c
       - |
-        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'immutabledict' 'psutil' --user) && "$0" "$@"
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          'lm-eval==0.4.4' \
+          'transformers>=4.35.0' \
+          'torch>=2.0.0' \
+          'accelerate>=0.25.0' \
+          'datasets>=2.14.0,<4.0.0' \
+          'evaluate>=0.4.0' \
+          'scikit-learn>=1.3.0' \
+          'pandas>=2.0.0' \
+          'numpy<2.0.0' \
+          'tqdm>=4.65.0' \
+          'sentencepiece>=0.1.99' \
+          'protobuf>=3.20.0' \
+          'tokenizers>=0.13.0' \
+          'codecarbon>=2.3.0' \
+          'peft>=0.7.0' \
+          'langdetect' \
+          'bitsandbytes>=0.41.0' \
+          'einops>=0.7.0' \
+          'immutabledict' \
+          'psutil' \
+          'scipy>=1.11.0'
+        exec "$0" "$@"
       - python3
       - -u
       - -c
@@ -56,6 +81,8 @@ implementation:
         import time
         import traceback
         import shutil
+        import tempfile
+        import atexit
         from typing import Dict, Any, List, Optional, Tuple
         import numpy as np
         import torch
@@ -235,21 +262,24 @@ implementation:
                     )
                 return logits, loss
 
-        
+
+
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
-        
-        log("Starting GemmaLMEval V7 - Production Mode")
-        
-        # Composite task groups for aggregate scoring (use ORIGINAL names)
-        COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval", "gpqa"]
-        
+
+        log("Starting GemmaLMEval V9 - Production Mode")
+
         # Dataset preloading map (for datasets that need special handling)
         PRELOAD_MAP = {
             "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
+            "mmlu": [("cais/mmlu", "all")],
+            "mmlu_pro": [("BatsResearch/mmlu_pro", "main")],
+            "bbh": [("lukaemon/bbh", "main")],
+            "math": [("openai/gsm8k", "main"), ("competition_math", "main")],
+            "ifeval": [("google/ifeval", "prompt_level")],
         }
-        
+
         def safe_json(obj):
             if isinstance(obj, dict):
                 return {k: safe_json(v) for k, v in obj.items()}
@@ -269,60 +299,57 @@ implementation:
                 return obj
             except Exception:
                 return str(obj)
-        
+
         def pick_metric(result_dict: Dict) -> Tuple[Optional[str], Optional[float]]:
             if not isinstance(result_dict, dict):
                 return None, None
-            
+
             # Priority order for metric selection
             priority_metrics = [
-                "acc_norm,none", "acc_norm",
-                "acc,none", "acc", "accuracy",
-                "exact_match,none", "exact_match", "em",
-                "f1,none", "f1",
-                "bleu,none", "bleu",
-                "rouge,none", "rouge",
+                "acc_norm", "acc", "accuracy",
+                "exact_match", "em",
+                "f1", "bleu", "rouge",
             ]
-            
+
             # Try priority metrics first
             for metric_name in priority_metrics:
                 if metric_name in result_dict:
                     value = result_dict[metric_name]
                     if isinstance(value, (int, float)):
                         return metric_name, float(value)
-            
+
             # Fallback: find any numeric metric
             for key, value in result_dict.items():
                 if isinstance(value, (int, float)) and not key.startswith("_"):
                     return key, float(value)
-            
+
             return None, None
-        
+
         def detect_math_tasks(task_manager: Optional[TaskManager]) -> List[str]:
             if task_manager is None:
                 return ["hendrycks_math"]
-            
+
             try:
                 available = set(task_manager.task_index)
                 math_tasks = sorted([
-                    t for t in available 
+                    t for t in available
                     if "hendrycks_math" in t.lower()
                 ])
-                
+
                 if math_tasks:
                     log(f"Detected {len(math_tasks)} hendrycks_math tasks: {math_tasks[:3]}{'...' if len(math_tasks) > 3 else ''}")
                     return [math_tasks[0]]  # Use first hendrycks_math task
-                
+
                 log("No hendrycks_math tasks found, using fallback")
                 return ["hendrycks_math"]
             except Exception as e:
                 log(f"Error detecting math tasks: {e}")
                 return ["hendrycks_math"]
-        
+
         def resolve_task_list(tasks_str: str, task_manager: Optional[TaskManager]) -> Tuple[List[str], Dict[str, str]]:
             tasks_str = tasks_str.strip()
             task_name_map = {}
-            
+
             # Special case: entire string is "math" or "math_auto"
             if tasks_str.lower() in ("math", "math_auto"):
                 math_tasks = detect_math_tasks(task_manager)
@@ -330,14 +357,14 @@ implementation:
                 task_name_map[actual_task] = "math"
                 log(f"Expanded standalone 'math' to: {actual_task}")
                 return [actual_task], task_name_map
-            
+
             # Parse comma-separated tasks
             parsed_tasks = [t.strip() for t in tasks_str.split(",") if t.strip()]
             actual_tasks = []
-            
+
             for original_task in parsed_tasks:
                 task_lower = original_task.lower()
-                
+
                 # Handle "math" in comma-separated list
                 if task_lower in ("math", "math_auto"):
                     math_tasks = detect_math_tasks(task_manager)
@@ -349,7 +376,7 @@ implementation:
                     # Use as-is
                     actual_tasks.append(original_task)
                     task_name_map[original_task] = original_task
-                    
+
                     # Validate task exists (warning only)
                     if task_manager:
                         try:
@@ -358,15 +385,15 @@ implementation:
                                 log(f"⚠ WARNING: Task '{original_task}' not found in task registry")
                         except Exception:
                             pass
-            
+
             return actual_tasks, task_name_map
-        
+
         def preload_datasets(task: str, hf_token: str) -> bool:
-            task_key = task.lower()
-            
+            task_lower = task.lower()
+            success = False
+
             for keyword, entries in PRELOAD_MAP.items():
-                if keyword in task_key:
-                    success = False
+                if keyword in task_lower:
                     for repo, split in entries:
                         try:
                             log(f"Preloading dataset {repo}::{split}")
@@ -379,23 +406,33 @@ implementation:
                             success = True
                         except Exception as e:
                             log(f"⚠ Preload failed for {repo}::{split}: {e}")
-                    return success
-            
-            return False
-        
+                    break  # Stop after first match
+
+            return success
+
         def log_system_info():
             try:
                 mem = psutil.virtual_memory()
                 log(f"System RAM: {mem.total / 1e9:.2f} GB total, {mem.available / 1e9:.2f} GB available")
+                
+                # Check for low memory
+                if mem.available < 2 * 1024**3:  # Less than 2GB available
+                    log("⚠ WARNING: Low system memory available!")
+                if mem.available < 1 * 1024**3:  # Less than 1GB available
+                    log("⚠ CRITICAL: Very low memory! Evaluation may fail!")
             except Exception as e:
                 log(f"⚠ Could not read RAM info: {e}")
-            
+
             try:
                 total, used, free = shutil.disk_usage("/")
                 log(f"Disk space: {total / 1e9:.2f} GB total, {free / 1e9:.2f} GB free")
+                
+                # Check for low disk space
+                if free < 5 * 1024**3:  # Less than 5GB free
+                    log("⚠ WARNING: Low disk space!")
             except Exception as e:
                 log(f"⚠ Could not read disk info: {e}")
-            
+
             if torch.cuda.is_available():
                 gpu_count = torch.cuda.device_count()
                 log(f"CUDA available: {gpu_count} device(s)")
@@ -403,12 +440,99 @@ implementation:
                     try:
                         name = torch.cuda.get_device_name(i)
                         props = torch.cuda.get_device_properties(i)
-                        log(f"  GPU {i}: {name} ({props.total_memory / 1e9:.2f} GB)")
+                        gpu_mem = props.total_memory / 1e9
+                        log(f"  GPU {i}: {name} ({gpu_mem:.2f} GB)")
+                        
+                        # Check GPU memory
+                        if gpu_mem < 8:  # Less than 8GB
+                            log(f"⚠ WARNING: GPU {i} has limited memory ({gpu_mem:.1f} GB)")
                     except Exception as e:
                         log(f"  GPU {i}: <error reading properties: {e}>")
             else:
-                log("⚠ CUDA not available - using CPU")
-        
+                log("⚠ WARNING: CUDA not available - using CPU (slow)")
+
+        def setup_model_device(model_obj, force_cpu: bool = False):
+            try:
+                # First, try to detect if it's a proper model
+                if not hasattr(model_obj, '_model'):
+                    log("⚠ Model object missing '_model' attribute")
+                else:
+                    # Check and set pad_token if needed
+                    if hasattr(model_obj, '_tokenizer'):
+                        tokenizer = model_obj._tokenizer
+                        if tokenizer.pad_token is None:
+                            if tokenizer.eos_token:
+                                tokenizer.pad_token = tokenizer.eos_token
+                                log("✓ Set pad_token to eos_token")
+                            else:
+                                tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                                log("✓ Added [PAD] token")
+                
+                if force_cpu:
+                    device = torch.device("cpu")
+                    log("Forcing CPU execution")
+                elif torch.cuda.is_available():
+                    device = torch.device("cuda:0")
+                    
+                    # Check if model is already on GPU
+                    if hasattr(model_obj, '_model'):
+                        model_params = list(model_obj._model.parameters())
+                        if model_params and model_params[0].is_cuda:
+                            log("✓ Model already on GPU")
+                            return model_obj
+                    
+                    log(f"Moving model to GPU: {device}")
+                    
+                    # Move model to GPU
+                    if hasattr(model_obj, 'to'):
+                        model_obj = model_obj.to(device)
+                    
+                    # Convert to appropriate precision
+                    try:
+                        # Try bfloat16 first (if supported)
+                        if torch.cuda.is_bf16_supported():
+                            model_obj = model_obj.to(torch.bfloat16)
+                            log("✓ Converted model to bfloat16")
+                        else:
+                            model_obj = model_obj.to(torch.float16)
+                            log("✓ Converted model to float16")
+                    except Exception as e:
+                        log(f"⚠ Could not convert model precision: {e}")
+                        log("Using default precision")
+                else:
+                    device = torch.device("cpu")
+                    log("Using CPU (CUDA not available)")
+                
+                return model_obj
+            except Exception as e:
+                log(f"⚠ Error setting up model device: {e}")
+                traceback.print_exc()
+                return model_obj
+
+        def atomic_write(content, filepath, mode='w'):
+            temp = None
+            try:
+                # Create temp file in same directory
+                dirname = os.path.dirname(filepath)
+                if dirname:
+                    os.makedirs(dirname, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode=mode, dir=dirname, delete=False, suffix='.tmp') as f:
+                    temp = f.name
+                    if isinstance(content, dict):
+                        json.dump(content, f, indent=2)
+                    elif isinstance(content, str):
+                        f.write(content)
+                    else:
+                        f.write(str(content))
+                # Atomic move
+                os.replace(temp, filepath)
+                return True
+            except Exception as e:
+                log(f"⚠ Atomic write failed for {filepath}: {e}")
+                if temp and os.path.exists(temp):
+                    os.unlink(temp)
+                return False
+
         def evaluate_single_task(
             model_obj,
             actual_task: str,
@@ -427,20 +551,20 @@ implementation:
                 "traceback": None,
                 "raw_results": None
             }
-            
+
             start_time = time.time()
-            
+
             try:
                 # Preload datasets if needed
                 preload_datasets(actual_task, hf_token)
-                
+
                 # Run evaluation
                 log(f"Running evaluation:")
                 log(f"  - Task: {actual_task}")
                 log(f"  - Few-shot: {num_fewshot}")
                 log(f"  - Limit: {limit if limit is not None else 'ALL'}")
                 log(f"  - Batch size: {batch_size}")
-                
+
                 res = evaluator.simple_evaluate(
                     model=model_obj,
                     tasks=[actual_task],
@@ -448,19 +572,19 @@ implementation:
                     limit=limit,
                     batch_size=batch_size,
                 )
-                
+
                 result["time_s"] = time.time() - start_time
                 result["raw_results"] = safe_json(res)
-                
+
                 # Extract metric
                 results_dict = res.get("results", {})
-                
+
                 # Try to find task results
                 task_result = results_dict.get(actual_task)
                 if task_result is None and results_dict:
                     # Fallback: use first result
                     task_result = next(iter(results_dict.values()))
-                
+
                 if isinstance(task_result, dict):
                     metric_name, metric_value = pick_metric(task_result)
                     if metric_name is not None:
@@ -474,21 +598,21 @@ implementation:
                 else:
                     result["error"] = f"Unexpected result structure: {type(task_result)}"
                     log(f"⚠ Task '{original_task}': Unexpected result structure")
-                
+
             except Exception as e:
                 result["time_s"] = time.time() - start_time
                 result["error"] = str(e)
                 result["traceback"] = traceback.format_exc()
                 log(f"✗ Task '{original_task}' failed: {e}")
                 print(result["traceback"], flush=True)
-            
+
             return result
-        
+
         def main():
             log("=" * 70)
-            log("Gemma LM Evaluation Pipeline - Production Mode")
+            log("Gemma LM Evaluation Pipeline - Production Mode V9")
             log("=" * 70)
-            
+
             # Parse arguments
             parser = argparse.ArgumentParser(description="Evaluate Gemma3LM on lm_eval tasks")
             parser.add_argument("--gemma_model", required=True, help="Path to pickled model")
@@ -497,12 +621,13 @@ implementation:
             parser.add_argument("--limit", type=int, default=100)
             parser.add_argument("--batch_size", default="auto")
             parser.add_argument("--hf_token", default="")
+            parser.add_argument("--model_name", default="Gemma3")
             parser.add_argument("--out_compact", required=True)
             parser.add_argument("--out_full", required=True)
             parser.add_argument("--out_schema", required=True)
             parser.add_argument("--out_emissions", required=True)
             args = parser.parse_args()
-            
+
             # Handle limit: -1 means all examples
             if args.limit == -1:
                 eval_limit = None
@@ -510,292 +635,31 @@ implementation:
             else:
                 eval_limit = args.limit
                 log(f"Limit set to {eval_limit} examples per task")
-            
-            # Handle batch_size: -1 means auto, convert int to str
-            if isinstance(args.batch_size, int):
-                if args.batch_size == -1:
-                    eval_batch_size = "auto"
-                    log("Batch size set to -1: using AUTO batch size")
-                else:
+
+            # Handle batch_size: simplify conversion
+            try:
+                if isinstance(args.batch_size, int):
                     eval_batch_size = str(args.batch_size)
-                    log(f"Batch size set to {eval_batch_size}")
-            else:
-                eval_batch_size = str(args.batch_size)
+                else:
+                    eval_batch_size = str(args.batch_size).strip()
+                
                 if eval_batch_size == "-1":
                     eval_batch_size = "auto"
                     log("Batch size set to -1: using AUTO batch size")
+                elif eval_batch_size == "auto":
+                    log("Using AUTO batch size")
                 else:
-                    log(f"Batch size set to {eval_batch_size}")
-            
+                    try:
+                        int(eval_batch_size)
+                        log(f"Batch size set to {eval_batch_size}")
+                    except ValueError:
+                        log(f"Using batch size: {eval_batch_size}")
+            except Exception as e:
+                log(f"⚠ Error parsing batch size, using 'auto': {e}")
+                eval_batch_size = "auto"
+
             log(f"Configuration:")
             log(f"  Model: {args.gemma_model}")
+            log(f"  Model Name: {args.model_name}")
             log(f"  Tasks: {args.tasks}")
-            log(f"  Few-shot: {args.num_fewshot}")
-            log(f"  Limit: {eval_limit if eval_limit is not None else 'ALL'}")
-            log(f"  Batch size: {eval_batch_size}")
-            log(f"  HF Token: {'***' + args.hf_token[-4:] if args.hf_token else 'None'}")
-            
-            # Setup HF authentication
-            if args.hf_token:
-                os.environ["HF_TOKEN"] = args.hf_token
-                os.environ["HUGGINGFACE_HUB_TOKEN"] = args.hf_token
-                log("✓ HuggingFace authentication configured")
-            
-            # Setup cache directories
-            os.environ.update({
-                "HF_HOME": "/tmp/hf_cache",
-                "HF_DATASETS_CACHE": "/tmp/hf_cache",
-                "HUGGINGFACE_HUB_CACHE": "/tmp/hf_cache",
-                "HF_HUB_DISABLE_TELEMETRY": "1"
-            })
-            log("✓ Cache directories configured")
-            
-            # Create output directories
-            for path in [args.out_compact, args.out_full, args.out_schema, args.out_emissions]:
-                parent_dir = os.path.dirname(path)
-                if parent_dir:
-                    os.makedirs(parent_dir, exist_ok=True)
-            
-            # Log system info
-            log_system_info()
-            
-            # Load model
-            log(f"Loading model from: {args.gemma_model}")
-            if not os.path.exists(args.gemma_model):
-                log(f"✗ FATAL: Model file not found: {args.gemma_model}")
-                sys.exit(2)
-            
-            try:
-                with open(args.gemma_model, "rb") as f:
-                    gemma_lm = pickle.load(f)
-                log(f"✓ Model loaded: {type(gemma_lm)}")
-            except Exception as e:
-                log(f"✗ FATAL: Failed to load model: {e}")
-                traceback.print_exc()
-                sys.exit(2)
-            
-            # Initialize TaskManager for task resolution
-            log("Initializing TaskManager...")
-            try:
-                task_manager = TaskManager()
-                log(f"✓ TaskManager initialized with {len(task_manager.task_index)} tasks")
-            except Exception as e:
-                log(f"⚠ Warning: TaskManager initialization failed: {e}")
-                task_manager = None
-            
-            # Resolve task list with name mapping
-            actual_tasks, task_name_map = resolve_task_list(args.tasks, task_manager)
-            log(f"Tasks to evaluate ({len(actual_tasks)}): {actual_tasks}")
-            log(f"Task name mapping: {task_name_map}")
-            
-            # Start emissions tracking
-            log(f"Starting emissions tracking -> {args.out_emissions}")
-            tracker = EmissionsTracker(
-                output_dir=os.path.dirname(args.out_emissions) or ".",
-                output_file=os.path.basename(args.out_emissions)
-            )
-            tracker.start()
-            
-            # Evaluate all tasks
-            compact_results = {}
-            full_results = {}
-            schema_results = {}  # For schema_json with original names
-            
-            log("=" * 70)
-            log("Starting Task Evaluation")
-            log("=" * 70)
-            
-            for idx, actual_task in enumerate(actual_tasks, 1):
-                original_task = task_name_map.get(actual_task, actual_task)
-                
-                log(f"{'='*70}")
-                log(f"Task {idx}/{len(actual_tasks)}: {original_task}")
-                if actual_task != original_task:
-                    log(f"  (evaluating as: {actual_task})")
-                log(f"{'='*70}")
-                
-                task_result = evaluate_single_task(
-                    gemma_lm, actual_task, original_task,
-                    args.num_fewshot, eval_limit, 
-                    eval_batch_size, args.hf_token
-                )
-                
-                # Store in full results with ORIGINAL name
-                full_results[original_task] = task_result
-                
-                # Store in compact results with ORIGINAL name
-                if task_result["success"]:
-                    compact_results[original_task] = {
-                        task_result["metric_name"]: task_result["metric_value"],
-                        "time_s": round(task_result["time_s"], 3)
-                    }
-                    # Store in schema with ORIGINAL name and percentage
-                    schema_results[original_task] = round(task_result["metric_value"] * 100.0, 2)
-                else:
-                    compact_results[original_task] = {
-                        "error": task_result["error"],
-                        "time_s": round(task_result["time_s"], 3)
-                    }
-            
-            # Stop emissions tracking
-            log("Stopping emissions tracking...")
-            try:
-                emissions = tracker.stop()
-                try:
-                    co2_val = float(emissions) if emissions is not None else 0.0
-                except Exception:
-                    co2_val = 0.0
-            except Exception as e:
-                log(f"⚠ Failed to stop emissions tracker: {e}")
-                co2_val = 0.0
-            
-            compact_results["co2_emissions_kg"] = round(co2_val, 6)
-            full_results["co2_emissions_kg"] = round(co2_val, 6)
-            schema_results["co2_emissions_kg"] = round(co2_val, 6)
-            schema_results["ModelName"] = "Gemma3"
-            log(f"✓ CO2 emissions: {co2_val:.6f} kg")
-            
-            # Calculate composite mean (use ORIGINAL names)
-            composite_values = []
-            for original_task in COMPOSITE_GROUP:
-                if original_task in compact_results and isinstance(compact_results[original_task], dict):
-                    for k, v in compact_results[original_task].items():
-                        if k not in ("time_s", "error") and isinstance(v, (int, float)):
-                            composite_values.append(float(v))
-                            break
-            
-            if composite_values:
-                composite_mean = float(np.mean(composite_values))
-                compact_results["composite_mean"] = round(composite_mean, 6)
-                schema_results["composite_mean"] = round(composite_mean * 100.0, 2)
-                log(f"✓ Composite mean ({len(composite_values)} tasks): {composite_mean:.6f}")
-            else:
-                log(f"⚠ No valid scores found for composite mean calculation")
-            
-            # Calculate math mean for compact_results only (NOT for schema_json)
-            math_values = []
-            for original_task, entry in compact_results.items():
-                if "math" in original_task.lower() and isinstance(entry, dict):
-                    for k, v in entry.items():
-                        if k not in ("time_s", "error") and isinstance(v, (int, float)):
-                            math_values.append(float(v))
-                            break
-            
-            if math_values:
-                math_mean = float(np.mean(math_values))
-                compact_results["math_mean"] = round(math_mean, 6)
-                # NOTE: NOT adding math_mean to schema_results
-                log(f"✓ Math mean ({len(math_values)} tasks): {math_mean:.6f} (in compact_results only)")
-            
-            # Save all outputs
-            log("=" * 70)
-            log("Saving Results")
-            log("=" * 70)
-            
-            save_errors = []
-            
-            try:
-                with open(args.out_compact, "w") as f:
-                    json.dump(safe_json(compact_results), f, indent=2)
-                log(f"✓ Compact results: {args.out_compact}")
-            except Exception as e:
-                err_msg = f"Failed to save compact results: {e}"
-                log(f"✗ {err_msg}")
-                save_errors.append(err_msg)
-            
-            try:
-                with open(args.out_full, "w") as f:
-                    json.dump(safe_json(full_results), f, indent=2)
-                log(f"✓ Full results: {args.out_full}")
-            except Exception as e:
-                err_msg = f"Failed to save full results: {e}"
-                log(f"✗ {err_msg}")
-                save_errors.append(err_msg)
-            
-            try:
-                with open(args.out_schema, "w") as f:
-                    json.dump(schema_results, f, indent=2)
-                log(f"✓ Schema JSON: {args.out_schema}")
-            except Exception as e:
-                err_msg = f"Failed to save schema: {e}"
-                log(f"✗ {err_msg}")
-                save_errors.append(err_msg)
-            
-            # Verify emissions CSV exists
-            try:
-                if os.path.exists(args.out_emissions):
-                    log(f"✓ Emissions CSV: {args.out_emissions}")
-                else:
-                    log(f"⚠ Emissions CSV not found at: {args.out_emissions}")
-            except Exception as e:
-                log(f"⚠ Failed to check emissions CSV: {e}")
-            
-            # Print summary
-            log("=" * 70)
-            log("EVALUATION SUMMARY")
-            log("=" * 70)
-            
-            for task, data in compact_results.items():
-                if task in ("co2_emissions_kg", "composite_mean", "math_mean"):
-                    continue
-                if isinstance(data, dict):
-                    for k, v in data.items():
-                        if k not in ("time_s", "error"):
-                            if isinstance(v, (int, float)):
-                                log(f"  {task}: {k} = {v:.6f}")
-                                break
-                            else:
-                                log(f"  {task}: {k} = {v}")
-                                break
-            
-            if compact_results.get("composite_mean"):
-                log(f"Composite Mean: {compact_results['composite_mean']:.6f}")
-            if compact_results.get("math_mean"):
-                log(f"Math Mean: {compact_results['math_mean']:.6f}")
-            log(f"CO2 Emissions: {co2_val} kg")
-            
-            # Print machine-readable JSON
-            metric_payload = {
-                "compact": safe_json(compact_results),
-                "full": safe_json(full_results),
-                "schema": schema_results,
-                "co2_kg": compact_results.get("co2_emissions_kg", 0.0),
-                "save_errors": save_errors if save_errors else None
-            }
-            metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"))
-            print(metric_line, flush=True)
-            print(metric_line, file=sys.stderr, flush=True)
-            
-            # Final status
-            if save_errors:
-                log(f"⚠ Completed with {len(save_errors)} save error(s)")
-                for err in save_errors:
-                    log(f"  - {err}")
-            else:
-                log("=" * 70)
-                log("✓ Evaluation Pipeline Completed Successfully - Production Ready")
-                log("=" * 70)
-        
-        if __name__ == "__main__":
-            main()
-    args:
-      - --gemma_model
-      - {inputPath: gemma_model}
-      - --tasks
-      - {inputValue: tasks}
-      - --num_fewshot
-      - {inputValue: num_fewshot}
-      - --limit
-      - {inputValue: limit}
-      - --batch_size
-      - {inputValue: batch_size}
-      - --hf_token
-      - {inputValue: hf_token}
-      - --out_compact
-      - {outputPath: compact_metrics}
-      - --out_full
-      - {outputPath: full_results}
-      - --out_schema
-      - {outputPath: schema_json}
-      - --out_emissions
-      - {outputPath: emissions_csv}
+            log(f"  Few-shot: {args.num_few
