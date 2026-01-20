@@ -1,4 +1,4 @@
-name: HFConvertor v2
+name: HFConvertor v3
 inputs:
   - name: tokenizer_json
     type: Model
@@ -123,23 +123,107 @@ implementation:
 
         def normalize_keys_neox(orig_sd):
             new_sd = OrderedDict()
+            qkv_buffers = {}  # keyed by layer -> dict('q','k','v') for combining later
+        
             for k, v in orig_sd.items():
-                # Add gpt_neox prefix if not present
-                if not k.startswith("gpt_neox."):
-                    newk = "gpt_neox." + k
-                else:
-                    newk = k
-                # Map your custom keys to HF format
-                newk = newk.replace(".qkv_proj.", ".attention.query_key_value.")
+                newk = k
+                # ensure a top-level prefix for easier downstream handling
+                if not newk.startswith("gpt_neox."):
+                    newk = "gpt_neox." + newk
+        
+                # unify naming: blocks -> layers
+                newk = newk.replace(".blocks.", ".layers.")
+                # also handle either 'blocks.' after gpt_neox. or 'gpt_neox.blocks.' (above covers)
+                newk = newk.replace(".blocks.", ".layers.")
+                newk = newk.replace(".blocks", ".layers")
+        
+                # common upstream token embedding names -> embed_in / embed_out
+                # support variants: token_emb.weight, token_embedding.weight, embed.weight
+                newk = re.sub(r"\.token_emb(\.|_)","\.embed_in\\1", newk)
+                newk = newk.replace(".token_emb", ".embed_in")
+                newk = newk.replace(".token_embedding", ".embed_in")
+                newk = newk.replace(".embed.weight", ".embed_in.weight")  # if someone used embed.weight
+        
+                # map old attention out proj naming to HF naming (keep existing mapping you had)
                 newk = newk.replace(".out_proj.", ".attention.dense.")
+                # map qkv_proj variants (if present) to hf combined key
+                newk = newk.replace(".qkv_proj.", ".attention.query_key_value.")
+        
+                # Now handle separate W_query / W_key / W_value naming coming from some checkpoints
+                # We'll detect layers like: gpt_neox.layers.<N>.attn.W_query.weight
+                m = re.match(r"(gpt_neox\.layers\.(\d+)\.attn\.)W_(query|key|value)\.weight", newk)
+                if m:
+                    layer_prefix = m.group(1)  # e.g. gpt_neox.layers.0.attn.
+                    layer_idx = m.group(2)
+                    which = m.group(3)  # query/key/value
+                    # store under a temporary name; don't add to new_sd yet
+                    qkv_buffers.setdefault(layer_idx, {})[which] = v
+                    # record a placeholder key so further reporting knows we processed it
+                    # (do not add separate q/k/v into new_sd)
+                    continue
+        
+                # If everything else is fine, add to new_sd
                 new_sd[newk] = v
+        
+            # Try to combine q/k/v into a single HF-style query_key_value if possible
+            for layer_idx, parts in qkv_buffers.items():
+                prefix = f"gpt_neox.layers.{layer_idx}.attn."
+                q = parts.get("query")
+                k = parts.get("key")
+                v = parts.get("value")
+                if q is not None and k is not None and v is not None:
+                    try:
+                        # weights shapes must match; choose concat dim so result is (3*hidden, hidden) or (hidden, 3*hidden)
+                        qw = q
+                        kw = k
+                        vw = v
+                        if qw.shape == kw.shape == vw.shape:
+                            # concat along 0 seems a reasonable default for many layouts (results in 3*hidden, hidden)
+                            combined = torch.cat([qw, kw, vw], dim=0)
+                            new_sd[prefix + "attention.query_key_value.weight"] = combined
+                            print(f"[CONVERT] Combined Q/K/V -> {prefix}attention.query_key_value.weight")
+                        else:
+                            # shapes mismatch; emit separate keys with safer names (best-effort)
+                            new_sd[prefix + "attention.query.weight"] = qw
+                            new_sd[prefix + "attention.key.weight"] = kw
+                            new_sd[prefix + "attention.value.weight"] = vw
+                            print(f"[CONVERT] Left Q/K/V separate (shapes differ) for layer {layer_idx}")
+                    except Exception as e:
+                        print(f"[CONVERT] Failed to combine QKV for layer {layer_idx}: {e}")
+                        # as fallback add separate named weights
+                        if q is not None:
+                            new_sd[prefix + "attention.query.weight"] = q
+                        if k is not None:
+                            new_sd[prefix + "attention.key.weight"] = k
+                        if v is not None:
+                            new_sd[prefix + "attention.value.weight"] = v
+                else:
+                    # missing one or more parts: add whatever we have back as best-effort
+                    if q is not None:
+                        new_sd[prefix + "attention.query.weight"] = q
+                    if k is not None:
+                        new_sd[prefix + "attention.key.weight"] = k
+                    if v is not None:
+                        new_sd[prefix + "attention.value.weight"] = v
+                    print(f"[CONVERT] Incomplete QKV for layer {layer_idx}: parts={list(parts.keys())}")
+        
+            # Final safety normalizations for embed names: ensure embed_in exists
+            # If token_emb variant remained or token vocabulary name existed, map it now
+            if "gpt_neox.token_emb.weight" in new_sd and "gpt_neox.embed_in.weight" not in new_sd:
+                new_sd["gpt_neox.embed_in.weight"] = new_sd.pop("gpt_neox.token_emb.weight")
+                print("[CONVERT] Renamed gpt_neox.token_emb.weight -> gpt_neox.embed_in.weight")
+            # Also support bare 'gpt_neox.embed.weight' -> embed_in
+            if "gpt_neox.embed.weight" in new_sd and "gpt_neox.embed_in.weight" not in new_sd:
+                new_sd["gpt_neox.embed_in.weight"] = new_sd.pop("gpt_neox.embed.weight")
+                print("[CONVERT] Renamed gpt_neox.embed.weight -> gpt_neox.embed_in.weight")
+        
             return new_sd
 
         out = normalize_keys_neox(sd)
         
         # DEBUG: Print normalized keys
-        print("[DEBUG] Normalized checkpoint keys (first 20):")
-        for i, k in enumerate(list(out.keys())[:20]):
+        print("[DEBUG] Normalized checkpoint keys (first 30):")
+        for i, k in enumerate(list(out.keys())[:30]):
             print(f"  {i}: {k}")
         print(f"[DEBUG] Total keys after normalization: {len(out.keys())}")
 
@@ -147,10 +231,15 @@ implementation:
         if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
             out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
-        # Validate BEFORE saving
+
         if "gpt_neox.embed_in.weight" not in out:
-            print("[FATAL] checkpoint missing gpt_neox.embed_in.weight", file=sys.stderr)
-            sys.exit(3)
+            alt_candidates = [k for k in out.keys() if "embed" in k and "weight" in k]
+            if alt_candidates:
+                print(f"[WARN] embed_in not found; using {alt_candidates[0]} as embed_in")
+                out["gpt_neox.embed_in.weight"] = out[alt_candidates[0]]
+            else:
+                print("[FATAL] checkpoint missing gpt_neox.embed_in.weight", file=sys.stderr)
+                sys.exit(3)
 
         torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
         print("[CONVERT] Wrote pytorch_model.bin (gptneox)")
