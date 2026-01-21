@@ -9,7 +9,7 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/gemma-lm-eval:v1
+    image: kushagra4761/nesy-factory-gpu:t2.6v3
     command:
       - python3
       - -u
@@ -25,7 +25,7 @@ implementation:
         from tokenizers import Tokenizer
         import torch.nn.functional as F
         from lm_eval.api.model import LM
-        # from nesy_factory.language_model.gemma_wrapper import Gemma3LM
+        from nesy_factory.language_model.gemma_wrapper import Gemma3LM
         
         parser = argparse.ArgumentParser()
         parser.add_argument("--tokenizer_json", required=True)
@@ -37,229 +37,229 @@ implementation:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[INFO] Device selected: {device}")
 
-        import torch
-        import torch.nn.functional as F
-        from lm_eval.api.model import LM
-        from lm_eval.api.instance import Instance
-        from typing import List, Sequence
-        from tqdm import tqdm
+        # import torch
+        # import torch.nn.functional as F
+        # from lm_eval.api.model import LM
+        # from lm_eval.api.instance import Instance
+        # from typing import List, Sequence
+        # from tqdm import tqdm
         
-        class Gemma3LM(LM):
+        # class Gemma3LM(LM):
         
-            def __init__(self, model, tokenizer, device: str = "cuda"):
-                self.model = model.to(device)
-                self.model.eval()
-                self.tokenizer = tokenizer
-                self.device = device
+        #     def __init__(self, model, tokenizer, device: str = "cuda"):
+        #         self.model = model.to(device)
+        #         self.model.eval()
+        #         self.tokenizer = tokenizer
+        #         self.device = device
         
-                self._world_size = 1
-                self._rank = 0
-                self._local_rank = 0
+        #         self._world_size = 1
+        #         self._rank = 0
+        #         self._local_rank = 0
         
-            @property
-            def max_length(self) -> int:
-                return int(self.model.cfg.get("context_length", 2048))
+        #     @property
+        #     def max_length(self) -> int:
+        #         return int(self.model.cfg.get("context_length", 2048))
         
-            @property
-            def vocab_size(self) -> int:
-                try:
-                    return int(self.tokenizer.get_vocab_size())
-                except Exception:
-                    return int(getattr(self.tokenizer, "vocab_size", 0))
+        #     @property
+        #     def vocab_size(self) -> int:
+        #         try:
+        #             return int(self.tokenizer.get_vocab_size())
+        #         except Exception:
+        #             return int(getattr(self.tokenizer, "vocab_size", 0))
         
-            @property
-            def eos_token_id(self):
-                return getattr(self.tokenizer, "eos_token_id", None)
+        #     @property
+        #     def eos_token_id(self):
+        #         return getattr(self.tokenizer, "eos_token_id", None)
         
-            @property
-            def batch_size(self):
-                return 1
+        #     @property
+        #     def batch_size(self):
+        #         return 1
         
-            def tok_encode(self, text: str) -> List[int]:
-                enc = self.tokenizer.encode(text)
-                return list(enc.ids) if hasattr(enc, "ids") else list(enc)
+        #     def tok_encode(self, text: str) -> List[int]:
+        #         enc = self.tokenizer.encode(text)
+        #         return list(enc.ids) if hasattr(enc, "ids") else list(enc)
         
-            def tok_decode(self, tokens: Sequence[int]) -> str:
-                try:
-                    return self.tokenizer.decode(list(tokens), skip_special_tokens=False)
-                except Exception:
-                    return self.tokenizer.decode(list(tokens))
+        #     def tok_decode(self, tokens: Sequence[int]) -> str:
+        #         try:
+        #             return self.tokenizer.decode(list(tokens), skip_special_tokens=False)
+        #         except Exception:
+        #             return self.tokenizer.decode(list(tokens))
         
-            def _model_call(self, input_ids: Sequence[int]):
-                ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
-                with torch.no_grad():
-                    logits, _ = self.model(ids)
-                return logits
+        #     def _model_call(self, input_ids: Sequence[int]):
+        #         ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
+        #         with torch.no_grad():
+        #             logits, _ = self.model(ids)
+        #         return logits
         
-            def generate_until(self, requests: List[Instance], **kwargs) -> List[str]:
-                outputs = []
+        #     def generate_until(self, requests: List[Instance], **kwargs) -> List[str]:
+        #         outputs = []
         
-                print(f"Generating {len(requests)} responses...")
+        #         print(f"Generating {len(requests)} responses...")
         
-                for request in tqdm(requests, desc="Generation", ncols=100):
-                    context = request.args[0]
-                    gen_kwargs = request.args[1] if len(request.args) > 1 else {}
+        #         for request in tqdm(requests, desc="Generation", ncols=100):
+        #             context = request.args[0]
+        #             gen_kwargs = request.args[1] if len(request.args) > 1 else {}
         
-                    until = gen_kwargs.get('until', []) if isinstance(gen_kwargs, dict) else []
-                    max_gen_toks = gen_kwargs.get('max_gen_toks', 256) if isinstance(gen_kwargs, dict) else 256
+        #             until = gen_kwargs.get('until', []) if isinstance(gen_kwargs, dict) else []
+        #             max_gen_toks = gen_kwargs.get('max_gen_toks', 256) if isinstance(gen_kwargs, dict) else 256
         
-                    if isinstance(until, str):
-                        until = [until]
+        #             if isinstance(until, str):
+        #                 until = [until]
         
-                    input_ids = self.tok_encode(context)
-                    max_gen_toks = min(max_gen_toks, 256)
-                    generated_ids = list(input_ids)
+        #             input_ids = self.tok_encode(context)
+        #             max_gen_toks = min(max_gen_toks, 256)
+        #             generated_ids = list(input_ids)
         
-                    for _ in range(max_gen_toks):
-                        if len(generated_ids) >= self.max_length:
-                            break
+        #             for _ in range(max_gen_toks):
+        #                 if len(generated_ids) >= self.max_length:
+        #                     break
         
-                        logits = self._model_call(generated_ids)
-                        last_logits = logits[0, -1, :]
-                        next_id = int(torch.argmax(last_logits).item())
-                        generated_ids.append(next_id)
+        #                 logits = self._model_call(generated_ids)
+        #                 last_logits = logits[0, -1, :]
+        #                 next_id = int(torch.argmax(last_logits).item())
+        #                 generated_ids.append(next_id)
         
-                        current_text = self.tok_decode(generated_ids[len(input_ids):])
+        #                 current_text = self.tok_decode(generated_ids[len(input_ids):])
         
-                        if until:
-                            found_stop = False
-                            for stop_str in until:
-                                if stop_str in current_text:
-                                    idx = current_text.find(stop_str)
-                                    current_text = current_text[:idx]
-                                    found_stop = True
-                                    break
+        #                 if until:
+        #                     found_stop = False
+        #                     for stop_str in until:
+        #                         if stop_str in current_text:
+        #                             idx = current_text.find(stop_str)
+        #                             current_text = current_text[:idx]
+        #                             found_stop = True
+        #                             break
         
-                            if found_stop:
-                                outputs.append(current_text)
-                                break
-                    else:
-                        outputs.append(self.tok_decode(generated_ids[len(input_ids):]))
+        #                     if found_stop:
+        #                         outputs.append(current_text)
+        #                         break
+        #             else:
+        #                 outputs.append(self.tok_decode(generated_ids[len(input_ids):]))
         
-                return outputs
+        #         return outputs
         
-            def loglikelihood_rolling(self, requests: List[Instance], **kwargs) -> List[float]:
+        #     def loglikelihood_rolling(self, requests: List[Instance], **kwargs) -> List[float]:
         
-                results = []
+        #         results = []
         
-                print(f"Computing rolling loglikelihood for {len(requests)} texts...")
+        #         print(f"Computing rolling loglikelihood for {len(requests)} texts...")
         
-                for request in tqdm(requests, desc="Rolling LL", ncols=100):
-                    # Extract the text string from request
-                    text = request.args[0]
+        #         for request in tqdm(requests, desc="Rolling LL", ncols=100):
+        #             # Extract the text string from request
+        #             text = request.args[0]
         
-                    # Encode the full text
-                    token_ids = self.tok_encode(text)
+        #             # Encode the full text
+        #             token_ids = self.tok_encode(text)
         
-                    if len(token_ids) <= 1:
-                        results.append(0.0)
-                        continue
+        #             if len(token_ids) <= 1:
+        #                 results.append(0.0)
+        #                 continue
         
-                    # Compute log-likelihood for each token given previous tokens
-                    total_log_prob = 0.0
+        #             # Compute log-likelihood for each token given previous tokens
+        #             total_log_prob = 0.0
         
-                    # Process in chunks if text is too long
-                    max_chunk = self.max_length
+        #             # Process in chunks if text is too long
+        #             max_chunk = self.max_length
         
-                    if len(token_ids) <= max_chunk:
-                        # Process entire sequence at once
-                        logits = self._model_call(token_ids)  # (1, T, vocab)
-                        log_probs = F.log_softmax(logits[0], dim=-1)  # (T, vocab)
+        #             if len(token_ids) <= max_chunk:
+        #                 # Process entire sequence at once
+        #                 logits = self._model_call(token_ids)  # (1, T, vocab)
+        #                 log_probs = F.log_softmax(logits[0], dim=-1)  # (T, vocab)
         
-                        # Score tokens [1:] using logits [:-1]
-                        for i in range(1, len(token_ids)):
-                            target_token = token_ids[i]
-                            total_log_prob += log_probs[i-1, target_token].item()
-                    else:
-                        # Process in sliding windows for very long sequences
-                        for start_idx in range(0, len(token_ids) - 1, max_chunk - 1):
-                            end_idx = min(start_idx + max_chunk, len(token_ids))
-                            chunk = token_ids[start_idx:end_idx]
+        #                 # Score tokens [1:] using logits [:-1]
+        #                 for i in range(1, len(token_ids)):
+        #                     target_token = token_ids[i]
+        #                     total_log_prob += log_probs[i-1, target_token].item()
+        #             else:
+        #                 # Process in sliding windows for very long sequences
+        #                 for start_idx in range(0, len(token_ids) - 1, max_chunk - 1):
+        #                     end_idx = min(start_idx + max_chunk, len(token_ids))
+        #                     chunk = token_ids[start_idx:end_idx]
         
-                            if len(chunk) <= 1:
-                                continue
+        #                     if len(chunk) <= 1:
+        #                         continue
         
-                            logits = self._model_call(chunk)
-                            log_probs = F.log_softmax(logits[0], dim=-1)
+        #                     logits = self._model_call(chunk)
+        #                     log_probs = F.log_softmax(logits[0], dim=-1)
         
-                            # Score tokens in this chunk
-                            for i in range(1, len(chunk)):
-                                if start_idx + i >= len(token_ids):
-                                    break
-                                target_token = chunk[i]
-                                total_log_prob += log_probs[i-1, target_token].item()
+        #                     # Score tokens in this chunk
+        #                     for i in range(1, len(chunk)):
+        #                         if start_idx + i >= len(token_ids):
+        #                             break
+        #                         target_token = chunk[i]
+        #                         total_log_prob += log_probs[i-1, target_token].item()
         
-                    results.append(total_log_prob)
+        #             results.append(total_log_prob)
         
-                return results
+        #         return results
         
-            def loglikelihood(self, requests: List[Instance], **kwargs) -> List[tuple]:
-                results = []
+        #     def loglikelihood(self, requests: List[Instance], **kwargs) -> List[tuple]:
+        #         results = []
         
-                print(f"Computing loglikelihood for {len(requests)} requests...")
+        #         print(f"Computing loglikelihood for {len(requests)} requests...")
         
-                for request in tqdm(requests, desc="Loglikelihood", ncols=100):
-                    context = request.args[0]
-                    continuation = request.args[1]
+        #         for request in tqdm(requests, desc="Loglikelihood", ncols=100):
+        #             context = request.args[0]
+        #             continuation = request.args[1]
         
-                    ctx_ids = self.tok_encode(context) if context else []
-                    cont_ids = self.tok_encode(continuation) if continuation else []
+        #             ctx_ids = self.tok_encode(context) if context else []
+        #             cont_ids = self.tok_encode(continuation) if continuation else []
         
-                    if len(cont_ids) == 0:
-                        results.append((0.0, False))
-                        continue
+        #             if len(cont_ids) == 0:
+        #                 results.append((0.0, False))
+        #                 continue
         
-                    input_ids = list(ctx_ids) + list(cont_ids)
+        #             input_ids = list(ctx_ids) + list(cont_ids)
         
-                    if len(input_ids) > self.max_length:
-                        excess = len(input_ids) - self.max_length
-                        input_ids = input_ids[excess:]
-                        ctx_len = max(0, len(ctx_ids) - excess)
-                    else:
-                        ctx_len = len(ctx_ids)
+        #             if len(input_ids) > self.max_length:
+        #                 excess = len(input_ids) - self.max_length
+        #                 input_ids = input_ids[excess:]
+        #                 ctx_len = max(0, len(ctx_ids) - excess)
+        #             else:
+        #                 ctx_len = len(ctx_ids)
         
-                    logits = self._model_call(input_ids)
+        #             logits = self._model_call(input_ids)
         
-                    if ctx_len == 0:
-                        start_idx = 0
-                    else:
-                        start_idx = ctx_len - 1
+        #             if ctx_len == 0:
+        #                 start_idx = 0
+        #             else:
+        #                 start_idx = ctx_len - 1
         
-                    end_idx = start_idx + len(cont_ids)
+        #             end_idx = start_idx + len(cont_ids)
         
-                    if end_idx > logits.shape[1]:
-                        end_idx = logits.shape[1]
+        #             if end_idx > logits.shape[1]:
+        #                 end_idx = logits.shape[1]
         
-                    if start_idx >= end_idx:
-                        results.append((0.0, False))
-                        continue
+        #             if start_idx >= end_idx:
+        #                 results.append((0.0, False))
+        #                 continue
         
-                    pred_logits = logits[0, start_idx:end_idx, :]
-                    log_probs = F.log_softmax(pred_logits, dim=-1)
+        #             pred_logits = logits[0, start_idx:end_idx, :]
+        #             log_probs = F.log_softmax(pred_logits, dim=-1)
         
-                    target_tokens = input_ids[ctx_len:ctx_len + pred_logits.shape[0]]
+        #             target_tokens = input_ids[ctx_len:ctx_len + pred_logits.shape[0]]
         
-                    if len(target_tokens) == 0:
-                        results.append((0.0, False))
-                        continue
+        #             if len(target_tokens) == 0:
+        #                 results.append((0.0, False))
+        #                 continue
         
-                    total_log_prob = 0.0
-                    is_greedy = True
+        #             total_log_prob = 0.0
+        #             is_greedy = True
         
-                    for i, target_id in enumerate(target_tokens):
-                        if i >= log_probs.shape[0]:
-                            break
+        #             for i, target_id in enumerate(target_tokens):
+        #                 if i >= log_probs.shape[0]:
+        #                     break
         
-                        token_log_prob = log_probs[i, target_id].item()
-                        total_log_prob += token_log_prob
+        #                 token_log_prob = log_probs[i, target_id].item()
+        #                 total_log_prob += token_log_prob
         
-                        greedy_id = torch.argmax(log_probs[i]).item()
-                        if greedy_id != target_id:
-                            is_greedy = False
+        #                 greedy_id = torch.argmax(log_probs[i]).item()
+        #                 if greedy_id != target_id:
+        #                     is_greedy = False
         
-                    results.append((total_log_prob, is_greedy))
-        
-                return results
+        #             results.append((total_log_prob, is_greedy))
+      
+        #         return results
                 
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
