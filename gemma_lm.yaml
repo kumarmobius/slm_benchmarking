@@ -1,4 +1,4 @@
-name: Build Gemma3LM v2.12
+name: Build Gemma3LM v2.13
 inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
@@ -26,6 +26,7 @@ implementation:
         import torch.nn.functional as F
         from lm_eval.api.model import LM
         from nesy_factory.language_model.gemma_wrapper import Gemma3LM
+        from nesy_factory.language_model.gemma_implementation import Gemma3Model
         
         parser = argparse.ArgumentParser()
         parser.add_argument("--tokenizer_json", required=True)
@@ -36,211 +37,6 @@ implementation:
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[INFO] Device selected: {device}")
-
-        import torch
-        import torch.nn.functional as F
-        from lm_eval.api.model import LM
-        from lm_eval.api.instance import Instance
-        from typing import List, Sequence
-        from tqdm import tqdm
-        
-        
-        # class Gemma3LM(LM):
-        #     def __init__(self, model, tokenizer, device: str = "cuda"):
-        #         super().__init__()
-        
-        #         self.model = model.to(device)
-        #         self.model.eval()
-        #         self.tokenizer = tokenizer
-        #         self.device = device
-        
-        #         self._world_size = 1
-        #         self._rank = 0
-            #     self._local_rank = 0
-        
-            # # -------- required distributed properties --------
-            # @property
-            # def rank(self):
-            #     return self._rank
-        
-            # @property
-            # def world_size(self):
-            #     return self._world_size
-        
-            # @property
-            # def local_rank(self):
-            #     return self._local_rank
-        
-            # # -------- required LM properties --------
-            # @property
-            # def max_length(self) -> int:
-            #     return int(self.model.cfg.get("context_length", 2048))
-        
-            # @property
-            # def vocab_size(self) -> int:
-            #     if hasattr(self.tokenizer, "get_vocab_size"):
-            #         return int(self.tokenizer.get_vocab_size())
-            #     return int(getattr(self.tokenizer, "vocab_size", 0))
-        
-            # @property
-            # def eos_token_id(self):
-            #     return getattr(self.tokenizer, "eos_token_id", None)
-        
-            # @property
-            # def batch_size(self):
-            #     return 1
-        
-            # # -------- tokenization --------
-            # def tok_encode(self, text: str) -> List[int]:
-            #     enc = self.tokenizer.encode(text)
-            #     return list(enc.ids) if hasattr(enc, "ids") else list(enc)
-        
-            # def tok_decode(self, tokens: Sequence[int]) -> str:
-            #     try:
-            #         return self.tokenizer.decode(list(tokens), skip_special_tokens=False)
-            #     except Exception:
-            #         return self.tokenizer.decode(list(tokens))
-        
-            # # -------- model forward --------
-            # def _model_call(self, input_ids: Sequence[int]):
-            #     ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
-        
-            #     with torch.no_grad():
-            #         out = self.model(ids)
-        
-            #     if isinstance(out, (tuple, list)):
-            #         logits = out[0]
-            #     else:
-            #         logits = out
-        
-            #     return logits
-        
-            # # -------- generation --------
-            # def generate_until(self, requests: List[Instance], **kwargs) -> List[str]:
-            #     outputs = []
-        
-            #     for request in tqdm(requests, desc="Generation", ncols=100):
-            #         context = request.args[0]
-            #         gen_kwargs = request.args[1] if len(request.args) > 1 else {}
-        
-            #         until = gen_kwargs.get("until", []) if isinstance(gen_kwargs, dict) else []
-            #         max_gen_toks = gen_kwargs.get("max_gen_toks", 256) if isinstance(gen_kwargs, dict) else 256
-        
-            #         if isinstance(until, str):
-            #             until = [until]
-        
-            #         input_ids = self.tok_encode(context)
-            #         generated_ids = list(input_ids)
-        
-            #         for _ in range(min(max_gen_toks, 256)):
-            #             if len(generated_ids) >= self.max_length:
-            #                 break
-        
-            #             logits = self._model_call(generated_ids)
-            #             next_id = int(torch.argmax(logits[0, -1]).item())
-            #             generated_ids.append(next_id)
-        
-            #             gen_text = self.tok_decode(generated_ids[len(input_ids):])
-        
-            #             for stop_str in until:
-            #                 if stop_str in gen_text:
-            #                     outputs.append(gen_text.split(stop_str)[0])
-            #                     break
-            #             else:
-            #                 continue
-            #             break
-            #         else:
-            #             outputs.append(self.tok_decode(generated_ids[len(input_ids):]))
-        
-            #     return outputs
-        
-            # # -------- rolling loglikelihood --------
-            # def loglikelihood_rolling(self, requests: List[Instance], **kwargs) -> List[tuple]:
-            #     results = []
-        
-            #     for request in tqdm(requests, desc="Rolling LL", ncols=100):
-            #         text = request.args[0]
-            #         token_ids = self.tok_encode(text)
-        
-            #         if len(token_ids) <= 1:
-            #             results.append((0.0,))
-            #             continue
-        
-            #         total_ll = 0.0
-            #         max_len = self.max_length
-        
-            #         for start in range(0, len(token_ids) - 1, max_len - 1):
-            #             chunk = token_ids[start:start + max_len]
-            #             if len(chunk) <= 1:
-            #                 continue
-        
-            #             logits = self._model_call(chunk)
-            #             log_probs = F.log_softmax(logits[0], dim=-1)
-        
-            #             for i in range(1, len(chunk)):
-            #                 total_ll += log_probs[i - 1, chunk[i]].item()
-        
-            #         results.append((total_ll,))
-        
-            #     return results
-        
-            # # -------- conditional loglikelihood --------
-            # def loglikelihood(self, requests: List[Instance], **kwargs) -> List[tuple]:
-            #     results = []
-        
-            #     for request in tqdm(requests, desc="Loglikelihood", ncols=100):
-            #         context, continuation = request.args
-        
-            #         ctx_ids = self.tok_encode(context) if context else []
-            #         cont_ids = self.tok_encode(continuation)
-        
-            #         if not cont_ids:
-            #             results.append((0.0, False))
-            #             continue
-        
-            #         input_ids = ctx_ids + cont_ids
-        
-            #         if len(input_ids) > self.max_length:
-            #             excess = len(input_ids) - self.max_length
-            #             input_ids = input_ids[excess:]
-            #             ctx_len = max(0, len(ctx_ids) - excess)
-            #         else:
-            #             ctx_len = len(ctx_ids)
-        
-            #         logits = self._model_call(input_ids)
-        
-            #         start = max(ctx_len - 1, 0)
-            #         end = min(start + len(cont_ids), logits.shape[1])
-        
-            #         log_probs = F.log_softmax(logits[0, start:end], dim=-1)
-            #         targets = input_ids[ctx_len:ctx_len + log_probs.shape[0]]
-        
-            #         ll = 0.0
-            #         greedy = True
-        
-            #         for i, tok in enumerate(targets):
-            #             ll += log_probs[i, tok].item()
-            #             if torch.argmax(log_probs[i]).item() != tok:
-            #                 greedy = False
-        
-            #         results.append((ll, greedy))
-        
-            #     return results
-        
-            # # -------- device helpers --------
-            # def to(self, device):
-            #     self.device = device
-            #     self.model = self.model.to(device)
-            #     return self
-        
-            # def half(self):
-            #     self.model = self.model.half()
-            #     return self
-        
-            # def eval(self):
-            #     self.model.eval()
-            #     return self
-
                 
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
@@ -260,174 +56,174 @@ implementation:
         import torch.nn as nn
         import torch.nn.functional as F
         
-        def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
-            assert head_dim % 2 == 0
-            inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
-            positions = torch.arange(context_length, dtype=dtype)
-            angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)
-            angles = torch.cat((angles, angles), dim=1)
-            return torch.cos(angles), torch.sin(angles)
+        # def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
+        #     assert head_dim % 2 == 0
+        #     inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
+        #     positions = torch.arange(context_length, dtype=dtype)
+        #     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)
+        #     angles = torch.cat((angles, angles), dim=1)
+        #     return torch.cos(angles), torch.sin(angles)
         
-        def apply_rope(x, cos, sin):
-            *_, seq_len, head_dim = x.size()
-            x1, x2 = x[..., :head_dim//2], x[..., head_dim//2:]
-            cos_seq = cos[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
-            sin_seq = sin[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
-            rotated = torch.cat((-x2, x1), dim=-1)
-            return (x * cos_seq) + (rotated * sin_seq)
+        # def apply_rope(x, cos, sin):
+        #     *_, seq_len, head_dim = x.size()
+        #     x1, x2 = x[..., :head_dim//2], x[..., head_dim//2:]
+        #     cos_seq = cos[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
+        #     sin_seq = sin[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
+        #     rotated = torch.cat((-x2, x1), dim=-1)
+        #     return (x * cos_seq) + (rotated * sin_seq)
         
-        class RMSNorm(nn.Module):
-            def __init__(self, emb_dim, eps=1e-6, bias=False):
-                super().__init__()
-                self.eps = eps
-                self.scale = nn.Parameter(torch.zeros(emb_dim))
-                self.shift = nn.Parameter(torch.zeros(emb_dim)) if bias else None
+        # class RMSNorm(nn.Module):
+        #     def __init__(self, emb_dim, eps=1e-6, bias=False):
+        #         super().__init__()
+        #         self.eps = eps
+        #         self.scale = nn.Parameter(torch.zeros(emb_dim))
+        #         self.shift = nn.Parameter(torch.zeros(emb_dim)) if bias else None
             
-            def forward(self, x):
-                orig_dtype = x.dtype
-                x_f = x.float()
-                var = x_f.pow(2).mean(dim=-1, keepdim=True)
-                x_norm = x_f * torch.rsqrt(var + self.eps)
-                out = x_norm * (1.0 + self.scale.float())
-                if self.shift is not None:
-                    out = out + self.shift.float()
-                return out.to(orig_dtype)
+        #     def forward(self, x):
+        #         orig_dtype = x.dtype
+        #         x_f = x.float()
+        #         var = x_f.pow(2).mean(dim=-1, keepdim=True)
+        #         x_norm = x_f * torch.rsqrt(var + self.eps)
+        #         out = x_norm * (1.0 + self.scale.float())
+        #         if self.shift is not None:
+        #             out = out + self.shift.float()
+        #         return out.to(orig_dtype)
         
-        class GroupedQueryAttention(nn.Module):
-            def __init__(self, d_in, num_heads, num_kv_groups, head_dim=None, qk_norm=False, query_pre_attn_scalar=None, dtype=None):
-                super().__init__()
-                assert num_heads % num_kv_groups == 0
-                self.num_heads = num_heads
-                self.num_kv_groups = num_kv_groups
-                self.group_size = num_heads // num_kv_groups
-                self.head_dim = head_dim if head_dim is not None else d_in // num_heads
-                self.scaling = (query_pre_attn_scalar ** -0.5) if (query_pre_attn_scalar is not None) else (self.head_dim ** -0.5)
-                self.W_query = nn.Linear(d_in, num_heads * self.head_dim, bias=False, dtype=dtype)
-                self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
-                self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
-                self.out_proj = nn.Linear(num_heads * self.head_dim, d_in, bias=False, dtype=dtype)
-                self.q_norm = RMSNorm(self.head_dim) if qk_norm else None
-                self.k_norm = RMSNorm(self.head_dim) if qk_norm else None
+        # class GroupedQueryAttention(nn.Module):
+        #     def __init__(self, d_in, num_heads, num_kv_groups, head_dim=None, qk_norm=False, query_pre_attn_scalar=None, dtype=None):
+        #         super().__init__()
+        #         assert num_heads % num_kv_groups == 0
+        #         self.num_heads = num_heads
+        #         self.num_kv_groups = num_kv_groups
+        #         self.group_size = num_heads // num_kv_groups
+        #         self.head_dim = head_dim if head_dim is not None else d_in // num_heads
+        #         self.scaling = (query_pre_attn_scalar ** -0.5) if (query_pre_attn_scalar is not None) else (self.head_dim ** -0.5)
+        #         self.W_query = nn.Linear(d_in, num_heads * self.head_dim, bias=False, dtype=dtype)
+        #         self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        #         self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        #         self.out_proj = nn.Linear(num_heads * self.head_dim, d_in, bias=False, dtype=dtype)
+        #         self.q_norm = RMSNorm(self.head_dim) if qk_norm else None
+        #         self.k_norm = RMSNorm(self.head_dim) if qk_norm else None
             
-            def forward(self, x, cos, sin, mask=None):
-                B, T, _ = x.shape
-                q = self.W_query(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-                k = self.W_key(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
-                v = self.W_value(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
-                if self.q_norm is not None:
-                    q = self.q_norm(q)
-                if self.k_norm is not None:
-                    k = self.k_norm(k)
-                q = apply_rope(q, cos, sin)
-                k = apply_rope(k, cos, sin)
-                k = k.repeat_interleave(self.group_size, dim=1)
-                v = v.repeat_interleave(self.group_size, dim=1)
-                attn = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
-                if mask is not None:
-                    attn = attn.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
-                p = torch.softmax(attn, dim=-1)
-                out = torch.matmul(p, v).transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_dim)
-                return self.out_proj(out)
+        #     def forward(self, x, cos, sin, mask=None):
+        #         B, T, _ = x.shape
+        #         q = self.W_query(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        #         k = self.W_key(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
+        #         v = self.W_value(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
+        #         if self.q_norm is not None:
+        #             q = self.q_norm(q)
+        #         if self.k_norm is not None:
+        #             k = self.k_norm(k)
+        #         q = apply_rope(q, cos, sin)
+        #         k = apply_rope(k, cos, sin)
+        #         k = k.repeat_interleave(self.group_size, dim=1)
+        #         v = v.repeat_interleave(self.group_size, dim=1)
+        #         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
+        #         if mask is not None:
+        #             attn = attn.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        #         p = torch.softmax(attn, dim=-1)
+        #         out = torch.matmul(p, v).transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_dim)
+        #         return self.out_proj(out)
         
-        class FeedForward(nn.Module):
-            def __init__(self, cfg):
-                super().__init__()
-                emb_dim = cfg["emb_dim"]
-                hidden_dim = cfg["hidden_dim"]
-                dtype = cfg["dtype"]
-                self.fc1 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
-                self.fc2 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
-                self.fc3 = nn.Linear(hidden_dim, emb_dim, bias=False, dtype=dtype)
+        # class FeedForward(nn.Module):
+        #     def __init__(self, cfg):
+        #         super().__init__()
+        #         emb_dim = cfg["emb_dim"]
+        #         hidden_dim = cfg["hidden_dim"]
+        #         dtype = cfg["dtype"]
+        #         self.fc1 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
+        #         self.fc2 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
+        #         self.fc3 = nn.Linear(hidden_dim, emb_dim, bias=False, dtype=dtype)
             
-            def forward(self, x):
-                return self.fc3(F.gelu(self.fc1(x)) * self.fc2(x))
+        #     def forward(self, x):
+        #         return self.fc3(F.gelu(self.fc1(x)) * self.fc2(x))
         
-        class TransformerBlock(nn.Module):
-            def __init__(self, cfg, layer_type):
-                super().__init__()
-                self.layer_type = layer_type
-                self.attn = GroupedQueryAttention(
-                    d_in=cfg["emb_dim"],
-                    num_heads=cfg["n_heads"],
-                    num_kv_groups=cfg.get("n_kv_groups", 1),
-                    head_dim=cfg["head_dim"],
-                    qk_norm=cfg.get("qk_norm", False),
-                    query_pre_attn_scalar=cfg.get("query_pre_attn_scalar", None),
-                    dtype=cfg["dtype"]
-                )
-                self.input_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
-                self.post_attn_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
-                self.pre_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
-                self.post_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
-                self.ffn = FeedForward(cfg)
+        # class TransformerBlock(nn.Module):
+        #     def __init__(self, cfg, layer_type):
+        #         super().__init__()
+        #         self.layer_type = layer_type
+        #         self.attn = GroupedQueryAttention(
+        #             d_in=cfg["emb_dim"],
+        #             num_heads=cfg["n_heads"],
+        #             num_kv_groups=cfg.get("n_kv_groups", 1),
+        #             head_dim=cfg["head_dim"],
+        #             qk_norm=cfg.get("qk_norm", False),
+        #             query_pre_attn_scalar=cfg.get("query_pre_attn_scalar", None),
+        #             dtype=cfg["dtype"]
+        #         )
+        #         self.input_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+        #         self.post_attn_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+        #         self.pre_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+        #         self.post_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+        #         self.ffn = FeedForward(cfg)
             
-            def forward(self, x, cos, sin, mask=None):
-                residual = x
-                x = self.input_norm(x)
-                x = self.post_attn_norm(self.attn(x, cos, sin, mask) + residual)
-                residual = x
-                x = self.pre_ff_norm(x)
-                x = self.post_ff_norm(self.ffn(x) + residual)
-                return x
+        #     def forward(self, x, cos, sin, mask=None):
+        #         residual = x
+        #         x = self.input_norm(x)
+        #         x = self.post_attn_norm(self.attn(x, cos, sin, mask) + residual)
+        #         residual = x
+        #         x = self.pre_ff_norm(x)
+        #         x = self.post_ff_norm(self.ffn(x) + residual)
+        #         return x
         
-        class Gemma3Model(nn.Module):
-            def __init__(self, cfg):
-                super().__init__()
-                self.cfg = cfg
-                vocab_size = cfg["vocab_size"]
-                emb_dim = cfg["emb_dim"]
-                self.token_emb = nn.Embedding(vocab_size, emb_dim, dtype=cfg["dtype"])
-                self.blocks = nn.ModuleList([
-                    TransformerBlock(cfg, layer_type=cfg["layer_types"][i])
-                    for i in range(cfg["n_layers"])
-                ])
-                self.final_norm = RMSNorm(emb_dim, eps=cfg.get("rms_norm_eps", 1e-6))
-                self.out_head = nn.Linear(emb_dim, vocab_size, bias=False, dtype=cfg["dtype"])
-                self.cos_global, self.sin_global = compute_rope_params(
-                    cfg["head_dim"], cfg["rope_base"], cfg["context_length"], torch.float32
-                )
-                self.cos_local, self.sin_local = compute_rope_params(
-                    cfg["head_dim"], cfg["rope_local_base"], cfg["sliding_window"], torch.float32
-                )
+        # class Gemma3Model(nn.Module):
+        #     def __init__(self, cfg):
+        #         super().__init__()
+        #         self.cfg = cfg
+        #         vocab_size = cfg["vocab_size"]
+        #         emb_dim = cfg["emb_dim"]
+        #         self.token_emb = nn.Embedding(vocab_size, emb_dim, dtype=cfg["dtype"])
+        #         self.blocks = nn.ModuleList([
+        #             TransformerBlock(cfg, layer_type=cfg["layer_types"][i])
+        #             for i in range(cfg["n_layers"])
+        #         ])
+        #         self.final_norm = RMSNorm(emb_dim, eps=cfg.get("rms_norm_eps", 1e-6))
+        #         self.out_head = nn.Linear(emb_dim, vocab_size, bias=False, dtype=cfg["dtype"])
+        #         self.cos_global, self.sin_global = compute_rope_params(
+        #             cfg["head_dim"], cfg["rope_base"], cfg["context_length"], torch.float32
+        #         )
+        #         self.cos_local, self.sin_local = compute_rope_params(
+        #             cfg["head_dim"], cfg["rope_local_base"], cfg["sliding_window"], torch.float32
+        #         )
             
-            def _ensure_rope_on_device(self, device):
-                if self.cos_global.device != device:
-                    self.cos_global = self.cos_global.to(device)
-                    self.sin_global = self.sin_global.to(device)
-                if self.cos_local.device != device:
-                    self.cos_local = self.cos_local.to(device)
-                    self.sin_local = self.sin_local.to(device)
+        #     def _ensure_rope_on_device(self, device):
+        #         if self.cos_global.device != device:
+        #             self.cos_global = self.cos_global.to(device)
+        #             self.sin_global = self.sin_global.to(device)
+        #         if self.cos_local.device != device:
+        #             self.cos_local = self.cos_local.to(device)
+        #             self.sin_local = self.sin_local.to(device)
             
-            def forward(self, input_ids, labels=None):
-                x = self.token_emb(input_ids).to(self.cfg["dtype"])
-                B, T, _ = x.size()
-                device = x.device
-                self._ensure_rope_on_device(device)
+        #     def forward(self, input_ids, labels=None):
+        #         x = self.token_emb(input_ids).to(self.cfg["dtype"])
+        #         B, T, _ = x.size()
+        #         device = x.device
+        #         self._ensure_rope_on_device(device)
                 
-                mask_full = torch.tril(torch.ones((T, T), dtype=torch.bool, device=device))
-                window = self.cfg["sliding_window"]
-                mask_sliding = torch.zeros((T, T), dtype=torch.bool, device=device)
-                for i in range(T):
-                    start = max(0, i - window + 1)
-                    mask_sliding[i, start:i+1] = True
+        #         mask_full = torch.tril(torch.ones((T, T), dtype=torch.bool, device=device))
+        #         window = self.cfg["sliding_window"]
+        #         mask_sliding = torch.zeros((T, T), dtype=torch.bool, device=device)
+        #         for i in range(T):
+        #             start = max(0, i - window + 1)
+        #             mask_sliding[i, start:i+1] = True
                 
-                for i, block in enumerate(self.blocks):
-                    if self.cfg["layer_types"][i] == "sliding_attention":
-                        x = block(x, self.cos_local, self.sin_local, mask_sliding)
-                    else:
-                        x = block(x, self.cos_global, self.sin_global, mask_full)
+        #         for i, block in enumerate(self.blocks):
+        #             if self.cfg["layer_types"][i] == "sliding_attention":
+        #                 x = block(x, self.cos_local, self.sin_local, mask_sliding)
+        #             else:
+        #                 x = block(x, self.cos_global, self.sin_global, mask_full)
                 
-                x = self.final_norm(x)
-                logits = self.out_head(x)
+        #         x = self.final_norm(x)
+        #         logits = self.out_head(x)
                 
-                loss = None
-                if labels is not None:
-                    loss = F.cross_entropy(
-                        logits.view(-1, logits.size(-1)),
-                        labels.view(-1),
-                        reduction="mean"
-                    )
-                return logits, loss
+        #         loss = None
+        #         if labels is not None:
+        #             loss = F.cross_entropy(
+        #                 logits.view(-1, logits.size(-1)),
+        #                 labels.view(-1),
+        #                 reduction="mean"
+        #             )
+        #         return logits, loss
         
         print("[INFO] Loading model config...")
         with open(args.model_config, "r") as f:
