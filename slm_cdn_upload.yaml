@@ -1,4 +1,4 @@
-name: SLM CDN Upload
+name: SLM CDN Upload v1
 inputs:
   - { name: tokenizer_json, type: Model, description: "Tokenizer / vocabulary JSON file" }
   - { name: model_pt, type: Model, description: "Torch model .pt weights file" }
@@ -96,6 +96,7 @@ implementation:
             }
             
             # Write schema to output
+            os.makedirs(os.path.dirname(args.schema_json), exist_ok=True)
             with open(args.schema_json, "w") as f:
                 json.dump(schema, f)
             
