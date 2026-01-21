@@ -1,4 +1,4 @@
-name: GemmaLMEval V11
+name: GemmaLMEval V11.1
 inputs:
   - name: gemma_model
     type: Data
@@ -260,148 +260,230 @@ implementation:
                 return logits, loss
 
 
+        import torch
+        import torch.nn.functional as F
+        from lm_eval.api.model import LM
+        from lm_eval.api.instance import Instance
+        from typing import List, Sequence
+        from tqdm import tqdm
+        
         class Gemma3LM(LM):
-            def __init__(self, model, tokenizer, device="cuda"):
-                super().__init__()  # Initialize parent class
+        
+            def __init__(self, model, tokenizer, device: str = "cuda"):
                 self.model = model.to(device)
                 self.model.eval()
                 self.tokenizer = tokenizer
                 self.device = device
-                self._rank = 0  # Required by lm_eval
-                self._world_size = 1  # Required by lm_eval
-            
-            @property
-            def rank(self):
-                return self._rank
-            
-            @property
-            def world_size(self):
-                return self._world_size
+        
+                self._world_size = 1
+                self._rank = 0
+                self._local_rank = 0
         
             @property
-            def max_length(self):
-                return self.model.cfg["context_length"]
+            def max_length(self) -> int:
+                return int(self.model.cfg.get("context_length", 2048))
         
             @property
-            def vocab_size(self):
-                return self.tokenizer.get_vocab_size()
+            def vocab_size(self) -> int:
+                try:
+                    return int(self.tokenizer.get_vocab_size())
+                except Exception:
+                    return int(getattr(self.tokenizer, "vocab_size", 0))
         
             @property
             def eos_token_id(self):
-                return self.tokenizer.token_to_id("</s>")
-            
-            @property
-            def eot_token_id(self):
-                return self.eos_token_id
-            
+                return getattr(self.tokenizer, "eos_token_id", None)
+        
             @property
             def batch_size(self):
                 return 1
         
-            def tok_encode(self, text):
-                return self.tokenizer.encode(text).ids
+            def tok_encode(self, text: str) -> List[int]:
+                enc = self.tokenizer.encode(text)
+                return list(enc.ids) if hasattr(enc, "ids") else list(enc)
         
-            def tok_decode(self, tokens):
-                return self.tokenizer.decode(tokens)
+            def tok_decode(self, tokens: Sequence[int]) -> str:
+                try:
+                    return self.tokenizer.decode(list(tokens), skip_special_tokens=False)
+                except Exception:
+                    return self.tokenizer.decode(list(tokens))
         
-            def _model_call(self, input_ids):
-                input_ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
+            def _model_call(self, input_ids: Sequence[int]):
+                ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
                 with torch.no_grad():
-                    logits, _ = self.model(input_ids)
+                    logits, _ = self.model(ids)
                 return logits
         
-            def _model_generate(self, input_ids, max_length, **kwargs):
-                raise NotImplementedError()
+            def generate_until(self, requests: List[Instance], **kwargs) -> List[str]:
+                outputs = []
         
-            def loglikelihood(self, requests):
-                results = []
-            
-                for request in requests:
-                    # Handle Instance objects from lm_eval
-                    if hasattr(request, 'args'):
-                        context, continuation = request.args
-                    else:
-                        context, continuation = request
-                    
-                    ctx = self.tok_encode(context)
-                    cont = self.tok_encode(continuation)
-            
-                    input_ids = ctx + cont
-            
-                    excess = len(input_ids) - self.max_length
-                    if excess > 0:
-                        ctx = ctx[excess:]
-                        input_ids = ctx + cont
-            
-                    logits = self._model_call(input_ids)
-            
-                    start = max(len(ctx) - 1, 0)
-                    end = start + len(cont)
-            
-                    continuation_logits = logits[0, start:end]
-                    log_probs = F.log_softmax(continuation_logits, dim=-1)
-            
-                    ll = 0.0
-                    for i, tok_id in enumerate(cont):
-                        ll += log_probs[i, tok_id].item()
-            
-                    results.append((ll, True))
-            
-                return results
-
-            
-            def loglikelihood_rolling(self, requests):
-                results = []
-                for request in requests:
-                    # Handle Instance objects from lm_eval
-                    if hasattr(request, 'args'):
-                        text, = request.args
-                    else:
-                        text, = request
-                        
-                    tokens = self.tok_encode(text)
-                    
-                    if len(tokens) == 0:
-                        results.append((0.0,))
-                        continue
-                        
-                    logits = self._model_call(tokens)
-                    log_probs = F.log_softmax(logits[0, :-1], dim=-1)
-                    
-                    ll = 0.0
-                    for i, tok_id in enumerate(tokens[1:]):
-                        ll += log_probs[i, tok_id].item()
-                    
-                    results.append((ll,))
-                return results
-            
-            def generate_until(self, requests):
-                results = []
-                for request in requests:
-                    # Handle Instance objects from lm_eval
-                    if hasattr(request, 'args'):
-                        context, gen_kwargs = request.args
-                    else:
-                        context, gen_kwargs = request
-                        
-                    # Simple implementation - just return the context
+                print(f"Generating {len(requests)} responses...")
+        
+                for request in tqdm(requests, desc="Generation", ncols=100):
+                    context = request.args[0]
+                    gen_kwargs = request.args[1] if len(request.args) > 1 else {}
+        
+                    until = gen_kwargs.get('until', []) if isinstance(gen_kwargs, dict) else []
+                    max_gen_toks = gen_kwargs.get('max_gen_toks', 256) if isinstance(gen_kwargs, dict) else 256
+        
+                    if isinstance(until, str):
+                        until = [until]
+        
                     input_ids = self.tok_encode(context)
-                    generated = self.tok_decode(input_ids)
-                    results.append(generated)
+                    max_gen_toks = min(max_gen_toks, 256)
+                    generated_ids = list(input_ids)
+        
+                    for _ in range(max_gen_toks):
+                        if len(generated_ids) >= self.max_length:
+                            break
+        
+                        logits = self._model_call(generated_ids)
+                        last_logits = logits[0, -1, :]
+                        next_id = int(torch.argmax(last_logits).item())
+                        generated_ids.append(next_id)
+        
+                        current_text = self.tok_decode(generated_ids[len(input_ids):])
+        
+                        if until:
+                            found_stop = False
+                            for stop_str in until:
+                                if stop_str in current_text:
+                                    idx = current_text.find(stop_str)
+                                    current_text = current_text[:idx]
+                                    found_stop = True
+                                    break
+        
+                            if found_stop:
+                                outputs.append(current_text)
+                                break
+                    else:
+                        outputs.append(self.tok_decode(generated_ids[len(input_ids):]))
+        
+                return outputs
+        
+            def loglikelihood_rolling(self, requests: List[Instance], **kwargs) -> List[float]:
+        
+                results = []
+        
+                print(f"Computing rolling loglikelihood for {len(requests)} texts...")
+        
+                for request in tqdm(requests, desc="Rolling LL", ncols=100):
+                    # Extract the text string from request
+                    text = request.args[0]
+        
+                    # Encode the full text
+                    token_ids = self.tok_encode(text)
+        
+                    if len(token_ids) <= 1:
+                        results.append(0.0)
+                        continue
+        
+                    # Compute log-likelihood for each token given previous tokens
+                    total_log_prob = 0.0
+        
+                    # Process in chunks if text is too long
+                    max_chunk = self.max_length
+        
+                    if len(token_ids) <= max_chunk:
+                        # Process entire sequence at once
+                        logits = self._model_call(token_ids)  # (1, T, vocab)
+                        log_probs = F.log_softmax(logits[0], dim=-1)  # (T, vocab)
+        
+                        # Score tokens [1:] using logits [:-1]
+                        for i in range(1, len(token_ids)):
+                            target_token = token_ids[i]
+                            total_log_prob += log_probs[i-1, target_token].item()
+                    else:
+                        # Process in sliding windows for very long sequences
+                        for start_idx in range(0, len(token_ids) - 1, max_chunk - 1):
+                            end_idx = min(start_idx + max_chunk, len(token_ids))
+                            chunk = token_ids[start_idx:end_idx]
+        
+                            if len(chunk) <= 1:
+                                continue
+        
+                            logits = self._model_call(chunk)
+                            log_probs = F.log_softmax(logits[0], dim=-1)
+        
+                            # Score tokens in this chunk
+                            for i in range(1, len(chunk)):
+                                if start_idx + i >= len(token_ids):
+                                    break
+                                target_token = chunk[i]
+                                total_log_prob += log_probs[i-1, target_token].item()
+        
+                    results.append(total_log_prob)
+        
                 return results
-            
-            def to(self, device):
-                self.device = device
-                self.model = self.model.to(device)
-                return self
-            
-            def half(self):
-                self.model = self.model.half()
-                return self
-            
-            def eval(self):
-                self.model.eval()
-                return self
+        
+            def loglikelihood(self, requests: List[Instance], **kwargs) -> List[tuple]:
+                
+                results = []
+        
+                print(f"Computing loglikelihood for {len(requests)} requests...")
+        
+                for request in tqdm(requests, desc="Loglikelihood", ncols=100):
+                    context = request.args[0]
+                    continuation = request.args[1]
+        
+                    ctx_ids = self.tok_encode(context) if context else []
+                    cont_ids = self.tok_encode(continuation) if continuation else []
+        
+                    if len(cont_ids) == 0:
+                        results.append((0.0, False))
+                        continue
+        
+                    input_ids = list(ctx_ids) + list(cont_ids)
+        
+                    if len(input_ids) > self.max_length:
+                        excess = len(input_ids) - self.max_length
+                        input_ids = input_ids[excess:]
+                        ctx_len = max(0, len(ctx_ids) - excess)
+                    else:
+                        ctx_len = len(ctx_ids)
+        
+                    logits = self._model_call(input_ids)
+        
+                    if ctx_len == 0:
+                        start_idx = 0
+                    else:
+                        start_idx = ctx_len - 1
+        
+                    end_idx = start_idx + len(cont_ids)
+        
+                    if end_idx > logits.shape[1]:
+                        end_idx = logits.shape[1]
+        
+                    if start_idx >= end_idx:
+                        results.append((0.0, False))
+                        continue
+        
+                    pred_logits = logits[0, start_idx:end_idx, :]
+                    log_probs = F.log_softmax(pred_logits, dim=-1)
+        
+                    target_tokens = input_ids[ctx_len:ctx_len + pred_logits.shape[0]]
+        
+                    if len(target_tokens) == 0:
+                        results.append((0.0, False))
+                        continue
+        
+                    total_log_prob = 0.0
+                    is_greedy = True
+        
+                    for i, target_id in enumerate(target_tokens):
+                        if i >= log_probs.shape[0]:
+                            break
+        
+                        token_log_prob = log_probs[i, target_id].item()
+                        total_log_prob += token_log_prob
+        
+                        greedy_id = torch.argmax(log_probs[i]).item()
+                        if greedy_id != target_id:
+                            is_greedy = False
+        
+                    results.append((total_log_prob, is_greedy))
+        
+                return results
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
