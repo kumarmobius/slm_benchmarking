@@ -1,4 +1,4 @@
-name: GemmaLMEval V12
+name: GemmaLMEval V13
 inputs:
   - name: gemma_model
     type: Data
@@ -63,9 +63,217 @@ implementation:
         from codecarbon import EmissionsTracker
         import torch.nn.functional as F
         from lm_eval.api.model import LM
-        from nesy_factory.language_model.gemma_wrapper import Gemma3LM
+        # from nesy_factory.language_model.gemma_wrapper import Gemma3LM
         from nesy_factory.language_model.gemma_implementation import Gemma3Model
 
+        #gemma wrapper
+        import torch
+        import torch.nn.functional as F
+        from lm_eval.api.model import LM
+        from lm_eval.api.instance import Instance
+        from typing import List, Sequence
+        from tqdm import tqdm
+        
+        
+        class Gemma3LM(LM):
+            def __init__(self, model, tokenizer, device: str = "cuda"):
+                super().__init__()
+        
+                self.model = model.to(device)
+                self.model.eval()
+                self.tokenizer = tokenizer
+                self.device = device
+        
+                self._world_size = 1
+                self._rank = 0
+                self._local_rank = 0
+        
+            # -------- required distributed properties --------
+            @property
+            def rank(self):
+                return self._rank
+        
+            @property
+            def world_size(self):
+                return self._world_size
+        
+            @property
+            def local_rank(self):
+                return self._local_rank
+        
+            # -------- required LM properties --------
+            @property
+            def max_length(self) -> int:
+                return int(self.model.cfg.get("context_length", 2048))
+        
+            @property
+            def vocab_size(self) -> int:
+                if hasattr(self.tokenizer, "get_vocab_size"):
+                    return int(self.tokenizer.get_vocab_size())
+                return int(getattr(self.tokenizer, "vocab_size", 0))
+        
+            @property
+            def eos_token_id(self):
+                return getattr(self.tokenizer, "eos_token_id", None)
+        
+            @property
+            def batch_size(self):
+                return 1
+        
+            # -------- tokenization --------
+            def tok_encode(self, text: str) -> List[int]:
+                enc = self.tokenizer.encode(text)
+                return list(enc.ids) if hasattr(enc, "ids") else list(enc)
+        
+            def tok_decode(self, tokens: Sequence[int]) -> str:
+                try:
+                    return self.tokenizer.decode(list(tokens), skip_special_tokens=False)
+                except Exception:
+                    return self.tokenizer.decode(list(tokens))
+        
+            # -------- model forward --------
+            def _model_call(self, input_ids: Sequence[int]):
+                # FIX: Explicitly specify dtype=torch.long for token IDs
+                # This ensures compatibility with both FP32 and FP16 models
+                ids = torch.tensor(input_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+        
+                with torch.no_grad():
+                    out = self.model(ids)
+        
+                if isinstance(out, (tuple, list)):
+                    logits = out[0]
+                else:
+                    logits = out
+        
+                return logits
+        
+            # -------- generation --------
+            def generate_until(self, requests: List[Instance], **kwargs) -> List[str]:
+                outputs = []
+        
+                for request in tqdm(requests, desc="Generation", ncols=100):
+                    context = request.args[0]
+                    gen_kwargs = request.args[1] if len(request.args) > 1 else {}
+        
+                    until = gen_kwargs.get("until", []) if isinstance(gen_kwargs, dict) else []
+                    max_gen_toks = gen_kwargs.get("max_gen_toks", 256) if isinstance(gen_kwargs, dict) else 256
+        
+                    if isinstance(until, str):
+                        until = [until]
+        
+                    input_ids = self.tok_encode(context)
+                    generated_ids = list(input_ids)
+        
+                    for _ in range(min(max_gen_toks, 256)):
+                        if len(generated_ids) >= self.max_length:
+                            break
+        
+                        logits = self._model_call(generated_ids)
+                        next_id = int(torch.argmax(logits[0, -1]).item())
+                        generated_ids.append(next_id)
+        
+                        gen_text = self.tok_decode(generated_ids[len(input_ids):])
+        
+                        for stop_str in until:
+                            if stop_str in gen_text:
+                                outputs.append(gen_text.split(stop_str)[0])
+                                break
+                        else:
+                            continue
+                        break
+                    else:
+                        outputs.append(self.tok_decode(generated_ids[len(input_ids):]))
+        
+                return outputs
+        
+            # -------- rolling loglikelihood --------
+            def loglikelihood_rolling(self, requests: List[Instance], **kwargs) -> List[tuple]:
+                results = []
+        
+                for request in tqdm(requests, desc="Rolling LL", ncols=100):
+                    text = request.args[0]
+                    token_ids = self.tok_encode(text)
+        
+                    if len(token_ids) <= 1:
+                        results.append((0.0,))
+                        continue
+        
+                    total_ll = 0.0
+                    max_len = self.max_length
+        
+                    for start in range(0, len(token_ids) - 1, max_len - 1):
+                        chunk = token_ids[start:start + max_len]
+                        if len(chunk) <= 1:
+                            continue
+        
+                        logits = self._model_call(chunk)
+                        log_probs = F.log_softmax(logits[0], dim=-1)
+        
+                        for i in range(1, len(chunk)):
+                            total_ll += log_probs[i - 1, chunk[i]].item()
+        
+                    results.append((total_ll,))
+        
+                return results
+        
+            # -------- conditional loglikelihood --------
+            def loglikelihood(self, requests: List[Instance], **kwargs) -> List[tuple]:
+                results = []
+        
+                for request in tqdm(requests, desc="Loglikelihood", ncols=100):
+                    context, continuation = request.args
+        
+                    ctx_ids = self.tok_encode(context) if context else []
+                    cont_ids = self.tok_encode(continuation)
+        
+                    if not cont_ids:
+                        results.append((0.0, False))
+                        continue
+        
+                    input_ids = ctx_ids + cont_ids
+        
+                    if len(input_ids) > self.max_length:
+                        excess = len(input_ids) - self.max_length
+                        input_ids = input_ids[excess:]
+                        ctx_len = max(0, len(ctx_ids) - excess)
+                    else:
+                        ctx_len = len(ctx_ids)
+        
+                    logits = self._model_call(input_ids)
+        
+                    start = max(ctx_len - 1, 0)
+                    end = min(start + len(cont_ids), logits.shape[1])
+        
+                    log_probs = F.log_softmax(logits[0, start:end], dim=-1)
+                    targets = input_ids[ctx_len:ctx_len + log_probs.shape[0]]
+        
+                    ll = 0.0
+                    greedy = True
+        
+                    for i, tok in enumerate(targets):
+                        ll += log_probs[i, tok].item()
+                        if torch.argmax(log_probs[i]).item() != tok:
+                            greedy = False
+        
+                    results.append((ll, greedy))
+        
+                return results
+        
+            # -------- device helpers --------
+            def to(self, device):
+                self.device = device
+                self.model = self.model.to(device)
+                return self
+        
+            def half(self):
+                # Convert model to half precision
+                # Embeddings and token IDs will remain in their appropriate dtypes
+                self.model = self.model.half()
+                return self
+        
+            def eval(self):
+                self.model.eval()
+                return self
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
