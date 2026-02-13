@@ -10,7 +10,7 @@ outputs:
   - {name: tokenizer_file, type: Model, description: "Downloaded tokenizer.json file"}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtest4
+    image: gurpreetgandhi/nesy-factory:v1
     command:
       - python3 
       - -u
