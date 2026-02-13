@@ -40,7 +40,7 @@ outputs:
 
 implementation:
   container:
-    image: kushagra4761/nesy-factory
+    image: gurpreetgandhi/nesy-factory:v1
     command:
       - python3
       - -u
