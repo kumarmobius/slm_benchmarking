@@ -11,7 +11,7 @@ outputs:
   - { name: schema_json, type: String, description: "Final schema JSON with CDN URLs and timestamp" }
 implementation:
   container:
-    image: python:3.8
+    image: gurpreetgandhi/nesy-factory:v1
     command:
       - python3
       - -u
